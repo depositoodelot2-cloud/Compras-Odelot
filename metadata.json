@@ -1,0 +1,6 @@
+{
+  "name": "Lista de Compras e Cotações",
+  "description": "Sistema empresarial de compras, cotações separadas por fábrica/fornecedor, controle de prioridades e portal de fornecedores.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

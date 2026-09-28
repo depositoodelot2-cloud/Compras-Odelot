@@ -1,0 +1,151 @@
+{
+  "entities": {
+    "PurchaseList": {
+      "title": "PurchaseList",
+      "description": "Lista de compras por fábrica/indústria com fornecedores autorizados",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "fabrica": { "type": "string" },
+        "descricao": { "type": "string" },
+        "fornecedoresIds": { "type": "array" },
+        "criadoPor": { "type": "string" },
+        "criadoEm": { "type": "string", "format": "date-time" },
+        "ativa": { "type": "boolean" }
+      },
+      "required": ["id", "nome", "fabrica", "fornecedoresIds", "criadoEm"]
+    },
+    "ProductItem": {
+      "title": "ProductItem",
+      "description": "Produto na lista de compras com prioridade e solicitante",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "listaId": { "type": "string" },
+        "nome": { "type": "string" },
+        "marca": { "type": "string" },
+        "unidade": { "type": "string" },
+        "quantidade": { "type": "number" },
+        "prioridade": {
+          "type": "string",
+          "enum": ["fixo", "novo", "cotacao", "urgente"]
+        },
+        "criadoPor": { "type": "object" },
+        "criadoEm": { "type": "string", "format": "date-time" },
+        "status": {
+          "type": "string",
+          "enum": ["pendente", "comprado"]
+        },
+        "observacao": { "type": "string" },
+        "codigoBarras": { "type": "string" },
+        "fotoUrl": { "type": "string" },
+        "fornecedorEscolhidoId": { "type": "string" }
+      },
+      "required": ["id", "listaId", "nome", "quantidade", "prioridade", "criadoEm", "status"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Fornecedor ou distribuidor habilitado a fornecer preços para fábricas",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "telefone": { "type": "string" },
+        "contatoNome": { "type": "string" },
+        "listasIds": { "type": "array" },
+        "tokenAcesso": { "type": "string" },
+        "ativo": { "type": "boolean" }
+      },
+      "required": ["id", "nome", "email", "telefone", "tokenAcesso"]
+    },
+    "SupplierQuote": {
+      "title": "SupplierQuote",
+      "description": "Resposta de cotação com preços, quantidades disponíveis e MA por item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "listaId": { "type": "string" },
+        "fornecedorId": { "type": "string" },
+        "itens": { "type": "object" },
+        "status": {
+          "type": "string",
+          "enum": ["pendente", "respondido"]
+        },
+        "preenchidoPor": {
+          "type": "string",
+          "enum": ["fornecedor", "empresa"]
+        },
+        "prazoEntrega": { "type": "string" },
+        "condicoesPagamento": { "type": "string" },
+        "frete": { "type": "string" },
+        "observacoesGerais": { "type": "string" },
+        "atualizadoEm": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "listaId", "fornecedorId", "itens", "status"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Colaborador da empresa que insere produtos ou gerencia compras",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "cargo": { "type": "string" },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "comprador", "estoquista"]
+        },
+        "avatar": { "type": "string" },
+        "cor": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "ativo": { "type": "boolean" }
+      },
+      "required": ["id", "nome", "cargo", "role", "avatar", "email"]
+    },
+    "CatalogProduct": {
+      "title": "CatalogProduct",
+      "description": "Base de produtos frequentes para adicionar à lista com 1 clique",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "nome": { "type": "string" },
+        "marcaPadrao": { "type": "string" },
+        "unidadePadrao": { "type": "string" },
+        "fabricaSugerida": { "type": "string" },
+        "prioridadePadrao": {
+          "type": "string",
+          "enum": ["fixo", "novo", "cotacao", "urgente"]
+        }
+      },
+      "required": ["id", "nome", "marcaPadrao", "unidadePadrao"]
+    }
+  },
+  "firestore": {
+    "/lists/{listId}": {
+      "schema": { "$ref": "PurchaseList" },
+      "description": "Coleção de listas de compras agrupadas por fábrica"
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "ProductItem" },
+      "description": "Produtos cadastrados nas listas de compras com prioridade"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": { "$ref": "Supplier" },
+      "description": "Fornecedores e distribuidores cadastrados para receber cotações"
+    },
+    "/quotes/{quoteId}": {
+      "schema": { "$ref": "SupplierQuote" },
+      "description": "Respostas de cotações com preços unitários, quantidades e MA"
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "UserProfile" },
+      "description": "Usuários do sistema (gerente, compradores, estoquistas)"
+    },
+    "/catalog/{catalogId}": {
+      "schema": { "$ref": "CatalogProduct" },
+      "description": "Catálogo base de produtos pré-cadastrados para agilizar lançamento"
+    }
+  }
+}
