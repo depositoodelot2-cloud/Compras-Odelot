@@ -182,7 +182,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
         }`}
         title={
           product.fotoUrl
-            ? 'Clique na foto para ampliar em 3 vezes (3x)'
+            ? 'Clique na foto para visualizar em tamanho ampliado (1x)'
             : 'Sem foto cadastrada (para editar ou adicionar foto, use os 3 pontinhos)'
         }
       >

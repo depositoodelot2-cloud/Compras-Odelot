@@ -1751,7 +1751,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           }`}
                           title={
                             item.fotoUrl
-                              ? 'Clique na foto para ampliar em 3 vezes (3x)'
+                              ? 'Clique na foto para visualizar (1x)'
                               : 'Clique para adicionar à lista'
                           }
                         >

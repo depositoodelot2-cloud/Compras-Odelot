@@ -19,8 +19,8 @@ export const ImageZoomModal: React.FC<ImageZoomModalProps> = ({
   subtitle,
   badge,
 }) => {
-  // Default to 3x magnification as requested ("ampliada em 3 vezes")
-  const [scale, setScale] = useState<number>(3);
+  // Default to 1x magnification as requested ("1x somente")
+  const [scale, setScale] = useState<number>(1);
   const [position, setPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const dragStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -35,7 +35,7 @@ export const ImageZoomModal: React.FC<ImageZoomModalProps> = ({
   // Reset zoom and pan when modal opens with a new image
   useEffect(() => {
     if (isOpen) {
-      setScale(3); // 3x zoom default
+      setScale(1); // 1x zoom default
       setPosition({ x: 0, y: 0 });
     }
   }, [isOpen, imageUrl]);
@@ -133,22 +133,17 @@ export const ImageZoomModal: React.FC<ImageZoomModalProps> = ({
     setIsDragging(false);
   };
 
-  // Toggle between 1x and 3x zoom on double-click
+  // Reset zoom on double-click
   const handleDoubleClick = () => {
-    if (scale > 1.5) {
-      setScale(1);
-      setPosition({ x: 0, y: 0 });
-    } else {
-      setScale(3);
-      setPosition({ x: 0, y: 0 });
-    }
+    setScale(1);
+    setPosition({ x: 0, y: 0 });
   };
 
   // Wheel zoom
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
-    const delta = e.deltaY < 0 ? 0.3 : -0.3;
-    setScale((prev) => Math.min(Math.max(prev + delta, 1), 6));
+    const delta = e.deltaY < 0 ? 0.2 : -0.2;
+    setScale((prev) => Math.min(Math.max(prev + delta, 1), 4));
   };
 
   if (!isOpen) return null;
@@ -171,8 +166,8 @@ export const ImageZoomModal: React.FC<ImageZoomModalProps> = ({
                 {badge}
               </span>
             )}
-            <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-              Ampliada 3x
+            <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30">
+              Visualização 1x
             </span>
           </div>
           {subtitle && (
@@ -194,14 +189,14 @@ export const ImageZoomModal: React.FC<ImageZoomModalProps> = ({
               <ZoomOut className="w-4 h-4" />
             </button>
 
-            {/* Quick 1x / 3x toggle buttons */}
+            {/* Quick 1x reset button */}
             <button
               type="button"
               onClick={() => {
                 setScale(1);
                 setPosition({ x: 0, y: 0 });
               }}
-              className={`px-2 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+              className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
                 scale === 1
                   ? 'bg-blue-600 text-white shadow-2xs'
                   : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
@@ -213,36 +208,23 @@ export const ImageZoomModal: React.FC<ImageZoomModalProps> = ({
 
             <button
               type="button"
-              onClick={() => {
-                setScale(3);
-                setPosition({ x: 0, y: 0 });
-              }}
-              className={`px-2 py-1 rounded-lg text-xs font-black transition-colors cursor-pointer flex items-center gap-1 ${
-                scale === 3
-                  ? 'bg-emerald-600 text-white shadow-2xs'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-700/60'
-              }`}
-              title="Ampliar em 3 vezes (3x)"
-            >
-              3x
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setScale((prev) => Math.min(prev + 0.5, 6))}
-              disabled={scale >= 6}
+              onClick={() => setScale((prev) => Math.min(prev + 0.5, 4))}
+              disabled={scale >= 4}
               className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-700/60 disabled:opacity-40 disabled:hover:bg-transparent cursor-pointer transition-colors"
               title="Aumentar Zoom (+)"
             >
               <ZoomIn className="w-4 h-4" />
             </button>
 
-            {(position.x !== 0 || position.y !== 0) && (
+            {(position.x !== 0 || position.y !== 0 || scale !== 1) && (
               <button
                 type="button"
-                onClick={() => setPosition({ x: 0, y: 0 })}
+                onClick={() => {
+                  setScale(1);
+                  setPosition({ x: 0, y: 0 });
+                }}
                 className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/60 cursor-pointer transition-colors"
-                title="Centralizar imagem"
+                title="Redefinir para 1x"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
               </button>
@@ -271,7 +253,7 @@ export const ImageZoomModal: React.FC<ImageZoomModalProps> = ({
         onTouchEnd={handleTouchEnd}
         onDoubleClick={handleDoubleClick}
         className={`relative flex-1 w-full h-full overflow-hidden flex items-center justify-center ${
-          isDragging ? 'cursor-grabbing' : scale > 1 ? 'cursor-grab' : 'cursor-zoom-in'
+          isDragging ? 'cursor-grabbing' : scale > 1 ? 'cursor-grab' : 'cursor-default'
         }`}
       >
         <div
@@ -285,7 +267,7 @@ export const ImageZoomModal: React.FC<ImageZoomModalProps> = ({
             src={imageUrl}
             alt={title}
             draggable={false}
-            className="max-w-[75vw] sm:max-w-[65vw] max-h-[70vh] object-contain rounded-lg shadow-2xl pointer-events-none ring-1 ring-white/10"
+            className="max-w-[85vw] sm:max-w-[75vw] max-h-[75vh] object-contain rounded-lg shadow-2xl pointer-events-none ring-1 ring-white/10"
           />
         </div>
       </div>
@@ -294,15 +276,14 @@ export const ImageZoomModal: React.FC<ImageZoomModalProps> = ({
       <div className="relative z-10 px-4 py-2.5 bg-slate-900/90 border-t border-slate-800 text-slate-400 text-[11px] sm:text-xs flex items-center justify-between shrink-0">
         <div className="flex items-center gap-2">
           <span className="font-semibold text-slate-200">
-            Zoom atual: {Math.round(scale * 100)}% ({scale}x)
+            Escala: 1x ({Math.round(scale * 100)}%)
           </span>
-          <span className="text-slate-600">•</span>
-          <span className="hidden sm:inline">
-            Clique duas vezes para alternar 1x / 3x
-          </span>
-          <span className="sm:hidden">
-            Arraste para mover o visor
-          </span>
+          {scale > 1 && (
+            <>
+              <span className="text-slate-600">•</span>
+              <span className="text-amber-400">Arraste para mover</span>
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-2">

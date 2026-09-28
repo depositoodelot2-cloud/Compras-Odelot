@@ -236,7 +236,7 @@ export const CatalogModal: React.FC<CatalogModalProps> = ({
                       }`}
                       title={
                         item.fotoUrl
-                          ? 'Clique para ampliar a foto em 3 vezes (3x)'
+                          ? 'Clique na foto para visualizar (1x)'
                           : 'Adicionar item à lista'
                       }
                     >
