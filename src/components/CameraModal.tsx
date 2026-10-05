@@ -193,13 +193,13 @@ export const CameraModal: React.FC<CameraModalProps> = ({
     ctx.drawImage(video, 0, 0, videoWidth, videoHeight);
 
     try {
-      const rawDataUrl = canvas.toDataURL('image/jpeg', 0.92);
+      const rawDataUrl = canvas.toDataURL('image/jpeg', 0.85);
       // Compress and optimize for storage
-      const optimized = await compressImage(rawDataUrl, 1200, 1200, 0.85);
+      const optimized = await compressImage(rawDataUrl, 640, 640, 0.70);
       setCapturedPhoto(optimized);
     } catch (err) {
       console.warn('Error compressing photo:', err);
-      const fallback = canvas.toDataURL('image/jpeg', 0.8);
+      const fallback = canvas.toDataURL('image/jpeg', 0.65);
       setCapturedPhoto(fallback);
     }
   };
@@ -227,7 +227,7 @@ export const CameraModal: React.FC<CameraModalProps> = ({
     const file = e.target.files?.[0];
     if (file) {
       try {
-        const compressed = await compressImage(file, 1200, 1200, 0.85);
+        const compressed = await compressImage(file, 640, 640, 0.70);
         setCapturedPhoto(compressed);
       } catch (err) {
         console.warn('Error processing native file:', err);

@@ -142,6 +142,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [catalogFotoUrl, setCatalogFotoUrl] = useState('');
   const [isCatalogCameraOpen, setIsCatalogCameraOpen] = useState(false);
   const [isCatalogBarcodeScannerOpen, setIsCatalogBarcodeScannerOpen] = useState(false);
+  const [isSearchBarcodeScannerOpen, setIsSearchBarcodeScannerOpen] = useState(false);
   const [activeCatalogMenuId, setActiveCatalogMenuId] = useState<string | null>(null);
   const [addedCatalogIds, setAddedCatalogIds] = useState<Record<string, boolean>>({});
   const [zoomedCatalogProduct, setZoomedCatalogProduct] = useState<CatalogProduct | null>(null);
@@ -562,6 +563,15 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 <h2 className="text-lg font-black text-slate-900 leading-tight">
                   Gerenciamento & Administração
                 </h2>
+                <button
+                  type="button"
+                  onClick={handleForceSyncFirebase}
+                  disabled={isSyncingFirebase}
+                  className="p-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 disabled:opacity-50 text-white rounded-lg transition-all cursor-pointer shadow-2xs shrink-0 flex items-center justify-center"
+                  title="Sincronizar com Firebase (enviar todos os dados salvos)"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingFirebase ? 'animate-spin' : ''}`} />
+                </button>
                 <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-100 text-blue-800">
                   Sessão Admin Ativa
                 </span>
@@ -569,21 +579,6 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                   Firebase: {(firebaseConfig as any).projectId || 'Conectado'}
                 </span>
-              </div>
-              <div className="flex items-center justify-between gap-3 mt-1.5 flex-wrap">
-                <p className="text-xs text-slate-500 leading-snug">
-                  Controle de funcionários, senhas, catálogo, planilhas e fornecedores
-                </p>
-                <button
-                  type="button"
-                  onClick={handleForceSyncFirebase}
-                  disabled={isSyncingFirebase}
-                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-lg text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs shrink-0"
-                  title="Enviar todos os dados salvos agora para o Firestore do Firebase"
-                >
-                  <RefreshCw className={`w-3 h-3 ${isSyncingFirebase ? 'animate-spin' : ''}`} />
-                  <span>{isSyncingFirebase ? 'Sincronizando...' : 'Sincronizar com Firebase'}</span>
-                </button>
               </div>
               {syncStatus && (
                 <div
@@ -1487,22 +1482,31 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               {/* Search & New Item Button */}
               <div className="flex items-center gap-2">
                 <div className="relative flex-1">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
                     type="text"
                     value={catalogSearch}
                     onChange={(e) => setCatalogSearch(e.target.value)}
                     placeholder="Buscar na base de produtos..."
-                    className="w-full pl-9 pr-3 py-2 bg-slate-100 focus:bg-white rounded-2xl text-xs font-semibold border border-transparent focus:border-blue-400 outline-hidden transition-all"
+                    className="w-full pl-9 pr-10 py-2 bg-slate-100 focus:bg-white rounded-2xl text-xs font-semibold border border-transparent focus:border-blue-400 outline-hidden transition-all placeholder:text-slate-400"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setIsSearchBarcodeScannerOpen(true)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-blue-600 p-1 rounded-lg transition-colors cursor-pointer"
+                    title="Buscar por Código de Barras com a Câmera"
+                  >
+                    <ScanBarcode className="w-4 h-4" />
+                  </button>
                 </div>
                 <button
                   type="button"
                   onClick={handleOpenNewCatalog}
-                  className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-2xs"
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-2xs"
+                  title="Cadastrar Novo Item na Base"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>Novo Item na Base</span>
+                  <span>Novo</span>
                 </button>
               </div>
 
@@ -1682,7 +1686,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                               const file = e.target.files?.[0];
                               if (file) {
                                 try {
-                                  const compressed = await compressImage(file, 1200, 1200, 0.85);
+                                  const compressed = await compressImage(file, 640, 640, 0.70);
                                   setCatalogFotoUrl(compressed);
                                 } catch (err) {
                                   console.warn('Erro ao processar imagem do catálogo:', err);
@@ -1716,12 +1720,16 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               {/* Product Cards identical to Lista de Compras and image.png */}
               <div className="space-y-1.5">
                 {catalog
-                  .filter(
-                    (c) =>
-                      c.nome.toLowerCase().includes(catalogSearch.toLowerCase()) ||
-                      c.marcaPadrao.toLowerCase().includes(catalogSearch.toLowerCase()) ||
-                      c.fabricaSugerida.toLowerCase().includes(catalogSearch.toLowerCase())
-                  )
+                  .filter((c) => {
+                    const q = catalogSearch.toLowerCase().trim();
+                    if (!q) return true;
+                    return (
+                      c.nome.toLowerCase().includes(q) ||
+                      c.marcaPadrao.toLowerCase().includes(q) ||
+                      c.fabricaSugerida.toLowerCase().includes(q) ||
+                      (c.codigoBarras && c.codigoBarras.toLowerCase().includes(q))
+                    );
+                  })
                   .map((item) => {
                     const isAdded = !!addedCatalogIds[item.id];
                     const pStyle = getPriorityStyle(item.prioridadePadrao || 'cotacao');
@@ -1818,6 +1826,17 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                 return !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1;
                               })()}
                             </span>
+
+                            {/* Código de barras após a quantidade quando presente */}
+                            {item.codigoBarras && item.codigoBarras.trim() && (
+                              <span
+                                className="inline-flex items-center gap-1 text-[11px] font-mono font-semibold text-slate-500 bg-slate-100 hover:bg-slate-200/80 px-1.5 py-0.5 rounded-md border border-slate-200/80 leading-none transition-colors"
+                                title={`Código de Barras: ${item.codigoBarras}`}
+                              >
+                                <ScanBarcode className="w-3 h-3 text-slate-400 shrink-0" />
+                                <span>{item.codigoBarras}</span>
+                              </span>
+                            )}
                           </div>
                         </div>
 
@@ -1928,13 +1947,28 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         title={catalogNome.trim() ? `Foto de: ${catalogNome}` : 'Tirar Foto para a Base'}
       />
 
-      {/* Barcode Scanner Modal for Catalog */}
+      {/* Barcode Scanner Modal for Catalog Form */}
       <BarcodeScannerModal
         isOpen={isCatalogBarcodeScannerOpen}
         onClose={() => setIsCatalogBarcodeScannerOpen(false)}
-        onScan={(code) => setCatalogCodigoBarras(code)}
+        onScan={(code) => {
+          setCatalogCodigoBarras(code.trim());
+          setIsCatalogBarcodeScannerOpen(false);
+        }}
         title="Código de Barras da Base"
         subtitle="Aponte para o código de barras ou QR Code do produto"
+      />
+
+      {/* Barcode Scanner Modal for Searching Catalog */}
+      <BarcodeScannerModal
+        isOpen={isSearchBarcodeScannerOpen}
+        onClose={() => setIsSearchBarcodeScannerOpen(false)}
+        onScan={(code) => {
+          setCatalogSearch(code.trim());
+          setIsSearchBarcodeScannerOpen(false);
+        }}
+        title="Buscar por Código de Barras"
+        subtitle="Aponte para o código de barras para localizar o item na base"
       />
 
       {/* 3x Zoom Image Modal */}

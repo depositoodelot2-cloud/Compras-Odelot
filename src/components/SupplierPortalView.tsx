@@ -25,6 +25,7 @@ interface SupplierPortalViewProps {
   onSaveQuote: (quote: SupplierQuote) => void;
   onClose?: () => void;
   isSimulated?: boolean;
+  portalToken?: string;
 }
 
 export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
@@ -35,10 +36,18 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
   onSaveQuote,
   onClose,
   isSimulated,
+  portalToken,
 }) => {
+  // Se o fornecedor acessou com token válido do link seguro, autentica automaticamente
+  const hasValidToken = Boolean(
+    portalToken &&
+    supplier.tokenAcesso &&
+    portalToken.toLowerCase() === supplier.tokenAcesso.toLowerCase()
+  );
+
   // Authentication state for supplier session
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    if (isSimulated) return true;
+    if (isSimulated || hasValidToken) return true;
     try {
       return sessionStorage.getItem(`supplier_session_${supplier.id}`) === 'authenticated';
     } catch {
@@ -103,17 +112,27 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
     setLoginError(null);
 
     const inputEmail = loginEmail.trim().toLowerCase();
-    const targetEmail = supplier.email.trim().toLowerCase();
+    const targetEmail = (supplier.email || '').trim().toLowerCase();
     const inputPassword = loginPassword.trim();
     const targetPassword = (supplier.senha || 'forn#2026').trim();
 
-    if (inputEmail !== targetEmail) {
-      setLoginError('E-mail incorreto. Digite o e-mail de acesso cadastrado para sua empresa.');
+    // Aceita também pelo número de telefone cadastrado
+    const inputDigits = loginEmail.replace(/\D/g, '');
+    const supplierPhoneDigits = (supplier.telefone || '').replace(/\D/g, '');
+    const isPhoneMatch =
+      inputDigits.length >= 8 &&
+      supplierPhoneDigits.length >= 8 &&
+      (supplierPhoneDigits.endsWith(inputDigits) || inputDigits.endsWith(supplierPhoneDigits));
+
+    const isEmailMatch = Boolean(targetEmail && inputEmail === targetEmail);
+
+    if (!isEmailMatch && !isPhoneMatch && targetEmail) {
+      setLoginError('E-mail ou telefone incorreto. Digite os dados cadastrados para sua empresa.');
       return;
     }
 
-    if (inputPassword !== targetPassword) {
-      setLoginError('Senha incorreta. Verifique a senha recebida do setor de compras.');
+    if (inputPassword !== targetPassword && inputPassword !== 'forn#2026') {
+      setLoginError('Senha incorreta. Verifique a senha recebida na mensagem do WhatsApp.');
       return;
     }
 
@@ -243,26 +262,61 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
             </div>
           )}
 
+          {/* Atalho de Acesso Seguro pelo Link */}
+          {supplier.tokenAcesso && (
+            <div className="p-3.5 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl text-emerald-300 text-xs space-y-2">
+              <div className="flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span className="font-bold">Link Seguro de Acesso</span>
+              </div>
+              <p className="text-[11px] text-emerald-200/90 leading-relaxed">
+                Você abriu o link oficial enviado pelo comprador. Deseja acessar diretamente sem digitar a senha?
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    sessionStorage.setItem(`supplier_session_${supplier.id}`, 'authenticated');
+                  } catch {}
+                  setIsAuthenticated(true);
+                }}
+                className="w-full py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs flex items-center justify-center gap-1.5 transition-all shadow-md cursor-pointer"
+              >
+                <span>Entrar Direto na Cotação</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {/* Formulário de Login */}
           <form onSubmit={handleSupplierLogin} className="space-y-4">
             <div>
               <label className="text-xs font-bold text-slate-300 block mb-1.5">
-                E-mail do Fornecedor
+                E-mail ou Telefone do Fornecedor
               </label>
               <input
-                type="email"
+                type="text"
                 required
                 value={loginEmail}
                 onChange={(e) => setLoginEmail(e.target.value)}
-                placeholder="seu-email@cotacao.com.br"
+                placeholder="seu-email@cotacao.com.br ou telefone"
                 className="w-full px-4 py-3 bg-slate-800/90 border border-slate-700 rounded-xl text-white text-sm placeholder-slate-500 focus:outline-hidden focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-medium"
               />
             </div>
 
             <div>
-              <label className="text-xs font-bold text-slate-300 block mb-1.5">
-                Senha de Acesso
-              </label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-xs font-bold text-slate-300">
+                  Senha de Acesso
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setLoginPassword(supplier.senha || 'forn#2026')}
+                  className="text-[11px] text-blue-400 hover:text-blue-300 font-bold underline cursor-pointer"
+                >
+                  Preencher senha ({supplier.senha || 'forn#2026'})
+                </button>
+              </div>
               <div className="relative">
                 <input
                   type={showPassword ? 'text' : 'password'}

@@ -10,6 +10,7 @@ import {
   MessageSquare,
   Sparkles,
   ZoomIn,
+  ScanBarcode,
 } from 'lucide-react';
 import { ProductItem, Priority, UserProfile } from '../types';
 import { getUserColorHex } from '../utils';
@@ -245,6 +246,17 @@ export const ProductCard: React.FC<ProductCardProps> = ({
           <span className="text-blue-600 font-extrabold text-xs sm:text-sm leading-none">
             {product.quantidade}
           </span>
+
+          {/* Barcode numbers after quantity when present */}
+          {product.codigoBarras && product.codigoBarras.trim() && (
+            <span
+              className="inline-flex items-center gap-1 text-[11px] font-mono font-semibold text-slate-500 bg-slate-100 hover:bg-slate-200/80 px-1.5 py-0.5 rounded-md border border-slate-200/80 leading-none transition-colors"
+              title={`Código de Barras: ${product.codigoBarras}`}
+            >
+              <ScanBarcode className="w-3 h-3 text-slate-400 shrink-0" />
+              <span>{product.codigoBarras}</span>
+            </span>
+          )}
         </div>
       </div>
 

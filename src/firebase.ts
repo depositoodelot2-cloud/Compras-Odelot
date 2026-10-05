@@ -9,7 +9,9 @@ import {
   getDocs,
   getDoc,
   enableIndexedDbPersistence,
-  getDocFromServer
+  getDocFromServer,
+  query,
+  where
 } from 'firebase/firestore';
 import {
   getAuth,
@@ -24,7 +26,7 @@ import {
   User as FirebaseUser
 } from 'firebase/auth';
 
-export { doc, getDoc, collection, setDoc, deleteDoc, onSnapshot, getDocs };
+export { doc, getDoc, collection, setDoc, deleteDoc, onSnapshot, getDocs, query, where };
 import firebaseConfig from '../firebase-applet-config.json';
 import { PurchaseList, ProductItem, Supplier, SupplierQuote, UserProfile, CatalogProduct } from './types';
 
@@ -152,7 +154,17 @@ const STORAGE_KEYS = {
   PRINCIPAL_LIST: 'app_compras_principal_list_id',
 };
 
-// Local storage helper
+// Helper to strip heavy base64 images from items when saving to limited localStorage (Firestore retains the full image)
+function sanitizeItemForLocalStorage(item: any): any {
+  if (!item || typeof item !== 'object') return item;
+  // If item has a massive base64 fotoUrl (> 50KB), strip or trim it for localStorage cache
+  if (typeof item.fotoUrl === 'string' && item.fotoUrl.length > 50000) {
+    return { ...item, fotoUrl: '' };
+  }
+  return item;
+}
+
+// Local storage helper with robust QuotaExceededError prevention and graceful recovery
 export function getLocal<T>(key: string, defaultVal: T): T {
   try {
     const val = localStorage.getItem(key);
@@ -165,20 +177,82 @@ export function getLocal<T>(key: string, defaultVal: T): T {
 export function setLocal<T>(key: string, val: T): void {
   try {
     localStorage.setItem(key, JSON.stringify(val));
-  } catch (e) {
-    console.error('Local storage write error', e);
+  } catch (e: any) {
+    // Check if error is QuotaExceededError
+    const isQuotaError =
+      e?.name === 'QuotaExceededError' ||
+      e?.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+      (e?.message && e.message.toLowerCase().includes('quota'));
+
+    if (isQuotaError) {
+      console.warn(`[LocalStorage] Cota excedida ao gravar '${key}'. Aplicando higienização de cache local...`);
+      try {
+        // Strategy 1: If array of items (like products or catalog), strip heavy base64 photo strings for local cache
+        if (Array.isArray(val)) {
+          const lightweightVal = val.map(sanitizeItemForLocalStorage);
+          localStorage.setItem(key, JSON.stringify(lightweightVal));
+          return;
+        }
+
+        // Strategy 2: Remove old non-critical keys to free space
+        const nonCriticalKeys = [
+          'app_compras_quotes',
+          'app_compras_clean_version',
+          'loglevel',
+          'firebase:previous_websocket_failure',
+        ];
+        nonCriticalKeys.forEach((k) => {
+          if (k !== key) {
+            try {
+              localStorage.removeItem(k);
+            } catch {}
+          }
+        });
+
+        // Try writing again
+        localStorage.setItem(key, JSON.stringify(val));
+      } catch (recoveryErr) {
+        // Safe failover: in-memory state and Firestore handle all persistence without crashing
+        console.warn(`[LocalStorage] Não foi possível gravar em cache local '${key}'. O Firestore continuará persistindo os dados.`);
+      }
+    } else {
+      console.warn('Local storage write warning:', e?.message || e);
+    }
   }
 }
 
 const DATA_VERSION_KEY = 'app_compras_clean_version';
 const CURRENT_DATA_VERSION = '2026_09_26_prod_clean';
 
-// Inicializar armazenamento local com dados iniciais se vazio
+// Inicializar armazenamento local com dados iniciais se vazio e limpar excessos de cota
 export function initializeStorage() {
   if (typeof window !== 'undefined') {
     if (localStorage.getItem(DATA_VERSION_KEY) !== CURRENT_DATA_VERSION) {
       localStorage.clear();
       localStorage.setItem(DATA_VERSION_KEY, CURRENT_DATA_VERSION);
+    } else {
+      // Clean oversized base64 cached items if present to prevent quota overflow
+      try {
+        const productCache = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
+        if (productCache && productCache.length > 500000) {
+          const parsed = JSON.parse(productCache);
+          if (Array.isArray(parsed)) {
+            const sanitized = parsed.map(sanitizeItemForLocalStorage);
+            localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(sanitized));
+          }
+        }
+      } catch {}
+
+      try {
+        const catalogCache = localStorage.getItem(STORAGE_KEYS.CATALOG);
+        if (catalogCache && catalogCache.length > 500000) {
+          const parsed = JSON.parse(catalogCache);
+          if (Array.isArray(parsed)) {
+            const sanitized = parsed.map(sanitizeItemForLocalStorage);
+            localStorage.setItem(STORAGE_KEYS.CATALOG, JSON.stringify(sanitized));
+          }
+        }
+      } catch {}
     }
   }
 

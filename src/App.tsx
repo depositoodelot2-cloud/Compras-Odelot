@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, Barcode, CheckCircle2, ChevronDown, Check, AlertCircle } from 'lucide-react';
+import { Plus, Barcode, CheckCircle2, ChevronDown, Check, AlertCircle, RefreshCw } from 'lucide-react';
 import {
   PurchaseList,
   ProductItem,
@@ -31,6 +31,10 @@ import {
   db,
   doc,
   getDoc,
+  collection,
+  getDocs,
+  query,
+  where,
 } from './firebase';
 import { Header } from './components/Header';
 import { PriorityFilters } from './components/PriorityFilters';
@@ -44,10 +48,10 @@ import { SupplierPortalView } from './components/SupplierPortalView';
 import { PrintQuoteModal } from './components/PrintQuoteModal';
 import { BottomNav } from './components/BottomNav';
 import { UserSwitchModal } from './components/UserSwitchModal';
+import { decodePortalPayload, syncPortalDataToServer, capitalizeWords } from './utils';
 import { LoginView } from './components/LoginView';
 import { BarcodeScannerModal } from './components/BarcodeScannerModal';
 import { ClearCacheModal } from './components/ClearCacheModal';
-import { decodePortalPayload, capitalizeWords } from './utils';
 
 const DEFAULT_EMPTY_LIST: PurchaseList = {
   id: '',
@@ -68,6 +72,7 @@ export default function App() {
     let supplierId = searchParams.get('supplierId');
     let listId = searchParams.get('listId');
     let data = searchParams.get('data');
+    let token = searchParams.get('token');
 
     if ((!portal || !supplierId || !listId) && window.location.hash) {
       const hashPart = window.location.hash.includes('?')
@@ -78,20 +83,24 @@ export default function App() {
       supplierId = supplierId || hashParams.get('supplierId');
       listId = listId || hashParams.get('listId');
       data = data || hashParams.get('data');
+      token = token || hashParams.get('token');
     }
 
     const isPortal =
       portal === 'fornecedor' ||
-      (!!supplierId && !!listId && window.location.href.includes('portal='));
+      (!!supplierId && !!listId && (window.location.href.includes('portal=') || window.location.href.includes('supplierId=')));
 
     return {
       isPortal,
       portal,
-      supplierId,
-      listId,
+      supplierId: supplierId ? supplierId.trim() : null,
+      listId: listId ? listId.trim() : null,
+      token: token ? token.trim() : null,
       encodedData: data,
     };
   }, []);
+
+  const [retryAttempt, setRetryAttempt] = useState<number>(0);
 
   const [portalResolved, setPortalResolved] = useState<{
     supplier: Supplier | null;
@@ -300,79 +309,156 @@ export default function App() {
     };
   }, []);
 
-  // Resolve supplier portal data with high availability (Payload -> Local -> Server -> Firestore)
+  // Resolve supplier portal data with high availability (Payload -> Server API -> Firestore -> Local)
   useEffect(() => {
     if (!portalInfo.isPortal) return;
 
     let isMounted = true;
+    let fallbackTimer: any = null;
 
     async function resolvePortalData() {
-      // 1. Direct Payload encoded in URL (100% resilient across devices/browsers)
+      // 1. Direct Payload encoded in URL (lightweight, instantaneous offline support)
       if (portalInfo.encodedData) {
-        const decoded = decodePortalPayload(portalInfo.encodedData);
-        if (decoded && decoded.s && decoded.l) {
-          const supplierFromPayload: Supplier = {
-            id: decoded.s.id,
-            nome: decoded.s.nome,
-            email: decoded.s.email,
-            telefone: decoded.s.telefone || '',
-            contatoNome: decoded.s.contatoNome || '',
-            senha: decoded.s.senha || 'forn#2026',
-            listasIds: [decoded.l.id],
-            tokenAcesso: 'tok-portal',
-            ativo: true,
-          };
-          const listFromPayload: PurchaseList = {
-            id: decoded.l.id,
-            nome: decoded.l.nome,
-            fabrica: decoded.l.fabrica,
-            descricao: decoded.l.descricao || '',
-            fornecedoresIds: [decoded.s.id],
-            criadoPor: 'Setor de Compras',
-            criadoEm: new Date().toISOString(),
-            ativa: true,
-          };
-          const productsFromPayload: ProductItem[] = (decoded.p || []).map((p) => ({
-            id: p.id,
-            listaId: decoded.l.id,
-            nome: p.nome,
-            marca: p.marca,
-            unidade: p.unidade,
-            quantidade: p.quantidade,
-            prioridade: (p.prioridade as Priority) || 'cotacao',
-            observacao: p.observacao || '',
-            fotoUrl: p.fotoUrl || '',
-            criadoPor: {
-              id: 'user-compras',
-              nome: 'Compras',
-              cargo: 'Comprador',
-              avatar: 'C',
-              cor: '#2563eb',
-            },
-            criadoEm: new Date().toISOString(),
-            status: 'pendente',
-          }));
+        try {
+          const decoded = decodePortalPayload(portalInfo.encodedData);
+          if (decoded && decoded.s && decoded.l) {
+            const supplierFromPayload: Supplier = {
+              id: decoded.s.id,
+              nome: decoded.s.nome,
+              email: decoded.s.email,
+              telefone: decoded.s.telefone || '',
+              contatoNome: decoded.s.contatoNome || '',
+              senha: decoded.s.senha || 'forn#2026',
+              listasIds: [decoded.l.id],
+              tokenAcesso: portalInfo.token || 'tok-portal',
+              ativo: true,
+            };
+            const listFromPayload: PurchaseList = {
+              id: decoded.l.id,
+              nome: decoded.l.nome,
+              fabrica: decoded.l.fabrica,
+              descricao: decoded.l.descricao || '',
+              fornecedoresIds: [decoded.s.id],
+              criadoPor: 'Setor de Compras',
+              criadoEm: new Date().toISOString(),
+              ativa: true,
+            };
+            const productsFromPayload: ProductItem[] = (decoded.p || []).map((p) => ({
+              id: p.id,
+              listaId: decoded.l.id,
+              nome: p.nome,
+              marca: p.marca || '',
+              unidade: p.unidade || 'un',
+              quantidade: p.quantidade || 1,
+              prioridade: (p.prioridade as Priority) || 'cotacao',
+              observacao: p.observacao || '',
+              fotoUrl: '',
+              criadoPor: {
+                id: 'user-compras',
+                nome: 'Compras',
+                cargo: 'Comprador',
+                avatar: 'C',
+                cor: '#2563eb',
+              },
+              criadoEm: new Date().toISOString(),
+              status: 'pendente',
+            }));
 
-          // Save into local storage
-          saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, supplierFromPayload);
-          saveDocument('lists', STORAGE_KEYS.LISTS, listFromPayload);
-          productsFromPayload.forEach((p) => saveDocument('products', STORAGE_KEYS.PRODUCTS, p));
-
-          if (isMounted) {
-            setPortalResolved({
+            // Sync with backend & local storage
+            syncPortalDataToServer({
               supplier: supplierFromPayload,
               list: listFromPayload,
               products: productsFromPayload,
-              quote: null,
-              isLoading: false,
-              error: false,
             });
-            return;
+            saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, supplierFromPayload);
+            saveDocument('lists', STORAGE_KEYS.LISTS, listFromPayload);
+            productsFromPayload.forEach((p) => saveDocument('products', STORAGE_KEYS.PRODUCTS, p));
+
+            if (isMounted) {
+              setPortalResolved({
+                supplier: supplierFromPayload,
+                list: listFromPayload,
+                products: productsFromPayload,
+                quote: null,
+                isLoading: false,
+                error: false,
+              });
+              return;
+            }
           }
+        } catch (e) {
+          console.warn('Could not decode URL payload, falling back to database:', e);
         }
       }
 
-      // 2. In-memory and LocalStorage check
+      // 2. Query Server API (/api/portal-quote) - fast, centralized and reliable
+      if (portalInfo.supplierId && portalInfo.listId) {
+        try {
+          const res = await fetch(
+            `/api/portal-quote?supplierId=${encodeURIComponent(portalInfo.supplierId)}&listId=${encodeURIComponent(portalInfo.listId)}&token=${encodeURIComponent(portalInfo.token || '')}`
+          );
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.supplier && data.list) {
+              if (isMounted) {
+                setPortalResolved({
+                  supplier: data.supplier,
+                  list: data.list,
+                  products: data.products || [],
+                  quote: data.quote || null,
+                  isLoading: false,
+                  error: false,
+                });
+                return;
+              }
+            }
+          }
+        } catch (err) {
+          console.warn('Erro ao carregar dados do portal via servidor:', err);
+        }
+      }
+
+      // 3. Query Firestore directly (accessible worldwide)
+      if (portalInfo.supplierId && portalInfo.listId) {
+        try {
+          const sDoc = await getDoc(doc(db, 'suppliers', portalInfo.supplierId));
+          const lDoc = await getDoc(doc(db, 'lists', portalInfo.listId));
+          if (sDoc.exists() && lDoc.exists()) {
+            const supplierData = { id: sDoc.id, ...sDoc.data() } as Supplier;
+            const listData = { id: lDoc.id, ...lDoc.data() } as PurchaseList;
+            const prodsSnap = await getDocs(
+              query(collection(db, 'products'), where('listaId', '==', portalInfo.listId))
+            );
+            const prods = prodsSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as ProductItem[];
+            const quotesSnap = await getDocs(
+              query(
+                collection(db, 'quotes'),
+                where('listaId', '==', portalInfo.listId),
+                where('fornecedorId', '==', portalInfo.supplierId)
+              )
+            );
+            const quoteData = quotesSnap.empty
+              ? null
+              : ({ id: quotesSnap.docs[0].id, ...quotesSnap.docs[0].data() } as SupplierQuote);
+
+            if (isMounted) {
+              setPortalResolved({
+                supplier: supplierData,
+                list: listData,
+                products: prods,
+                quote: quoteData,
+                isLoading: false,
+                error: false,
+              });
+              return;
+            }
+          }
+        } catch (fsErr) {
+          console.warn('Firestore direct portal lookup failed, trying local storage:', fsErr);
+        }
+      }
+
+      // 4. In-memory and LocalStorage check
       const localSuppliers = getLocal<Supplier[]>(STORAGE_KEYS.SUPPLIERS, INITIAL_SUPPLIERS);
       const localLists = getLocal<PurchaseList[]>(STORAGE_KEYS.LISTS, INITIAL_LISTS);
       const localProducts = getLocal<ProductItem[]>(STORAGE_KEYS.PRODUCTS, INITIAL_PRODUCTS);
@@ -411,45 +497,21 @@ export default function App() {
         }
       }
 
-      // 3. Server API check (/api/portal-quote)
-      try {
-        const res = await fetch(
-          `/api/portal-quote?supplierId=${encodeURIComponent(portalInfo.supplierId || '')}&listId=${encodeURIComponent(portalInfo.listId || '')}`
-        );
-        if (res.ok) {
-          const data = await res.json();
-          if (data && data.supplier && data.list) {
-            if (isMounted) {
-              setPortalResolved({
-                supplier: data.supplier,
-                list: data.list,
-                products: data.products || [],
-                quote: data.quote || null,
-                isLoading: false,
-                error: false,
-              });
-              return;
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('Erro ao carregar dados do portal via servidor:', err);
-      }
-
-      // 4. Fallback delay before showing not found screen
-      setTimeout(() => {
+      // 5. Timeout com margem segura antes de mostrar tela de cotação não encontrada
+      fallbackTimer = setTimeout(() => {
         if (isMounted) {
           setPortalResolved((prev) => ({ ...prev, isLoading: false, error: true }));
         }
-      }, 1500);
+      }, 4000);
     }
 
     resolvePortalData();
 
     return () => {
       isMounted = false;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
     };
-  }, [portalInfo, suppliers, lists, products]);
+  }, [portalInfo, suppliers, lists, products, retryAttempt]);
 
   // Firebase Authentication State Listener
   useEffect(() => {
@@ -1162,6 +1224,9 @@ export default function App() {
     const cleanCode = code.trim();
     if (!cleanCode) return;
 
+    // Immediately close the camera scanner modal so it never conflicts with ProductModal or other views
+    setIsMainBarcodeScannerOpen(false);
+
     // 1. Check if product in current list matches this barcode
     const listMatch = products.find(
       (p) => p.codigoBarras && p.codigoBarras.trim() === cleanCode
@@ -1169,6 +1234,10 @@ export default function App() {
 
     if (listMatch) {
       setSearchTerm(listMatch.nome);
+      setPurchaseToastMessage(`Produto "${listMatch.nome}" localizado na lista!`);
+      setTimeout(() => {
+        setPurchaseToastMessage(null);
+      }, 3500);
       return;
     }
 
@@ -1182,6 +1251,10 @@ export default function App() {
     if (catalogMatch) {
       handleAddFromCatalog(catalogMatch, 1, 'fixo');
       setSearchTerm(catalogMatch.nome);
+      setPurchaseToastMessage(`"${catalogMatch.nome}" adicionado do Catálogo!`);
+      setTimeout(() => {
+        setPurchaseToastMessage(null);
+      }, 3500);
     } else {
       // 3. Not found in catalog: open ProductModal pre-filled with this barcode
       setEditingProduct({
@@ -1223,6 +1296,7 @@ export default function App() {
               : products.filter((p) => p.listaId === portalResolved.list?.id)
           }
           existingQuote={portalResolved.quote}
+          portalToken={portalInfo.token || undefined}
           onSaveQuote={async (quote) => {
             await handleSaveQuote(quote);
             try {
@@ -1249,6 +1323,16 @@ export default function App() {
           </p>
 
           <div className="pt-3 flex flex-col gap-2.5">
+            <button
+              onClick={() => {
+                setPortalResolved((prev) => ({ ...prev, isLoading: true, error: false }));
+                setRetryAttempt((r) => r + 1);
+              }}
+              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl text-xs font-bold transition-all shadow-md cursor-pointer flex items-center justify-center gap-2"
+            >
+              <RefreshCw className="w-4 h-4" />
+              <span>Tentar Novamente</span>
+            </button>
             <button
               onClick={() => {
                 window.location.href = '/';

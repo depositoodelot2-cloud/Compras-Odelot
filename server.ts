@@ -139,20 +139,82 @@ app.post('/api/clear-cache', (req: Request, res: Response) => {
   });
 });
 
+// Synchronize active portal data so external links always resolve
+app.post('/api/sync-portal-data', (req: Request, res: Response) => {
+  const { supplier, list, products, quote } = req.body || {};
+  if (supplier && supplier.id) {
+    const idx = dbState.suppliers.findIndex((s: any) => s.id === supplier.id || s.id?.toLowerCase() === supplier.id?.toLowerCase());
+    if (idx >= 0) dbState.suppliers[idx] = { ...dbState.suppliers[idx], ...supplier };
+    else dbState.suppliers.unshift(supplier);
+  }
+  if (list && list.id) {
+    const idx = dbState.lists.findIndex((l: any) => l.id === list.id || l.id?.toLowerCase() === list.id?.toLowerCase());
+    if (idx >= 0) dbState.lists[idx] = { ...dbState.lists[idx], ...list };
+    else dbState.lists.unshift(list);
+  }
+  if (products && Array.isArray(products)) {
+    products.forEach((p: any) => {
+      const idx = dbState.products.findIndex((prod: any) => prod.id === p.id);
+      if (idx >= 0) dbState.products[idx] = { ...dbState.products[idx], ...p };
+      else dbState.products.push(p);
+    });
+  }
+  if (quote && quote.listaId && quote.fornecedorId) {
+    const idx = dbState.quotes.findIndex(
+      (q: any) =>
+        (q.listaId === quote.listaId || q.listaId?.toLowerCase() === quote.listaId?.toLowerCase()) &&
+        (q.fornecedorId === quote.fornecedorId || q.fornecedorId?.toLowerCase() === quote.fornecedorId?.toLowerCase())
+    );
+    if (idx >= 0) dbState.quotes[idx] = { ...dbState.quotes[idx], ...quote };
+    else dbState.quotes.unshift(quote);
+  }
+  persistDb();
+  res.json({
+    success: true,
+    supplierId: supplier?.id,
+    listId: list?.id,
+    productsCount: Array.isArray(products) ? products.length : 0,
+  });
+});
+
 // Portal Quote direct lookup for suppliers
 app.get('/api/portal-quote', (req: Request, res: Response) => {
-  const supplierId = req.query.supplierId as string;
-  const listId = req.query.listId as string;
+  const supplierId = (req.query.supplierId as string || '').trim();
+  const listId = (req.query.listId as string || '').trim();
+  const token = (req.query.token as string || '').trim();
 
   if (!supplierId || !listId) {
     return res.status(400).json({ error: 'supplierId e listId são obrigatórios' });
   }
 
-  const supplier = dbState.suppliers.find((s: any) => s.id === supplierId);
-  const list = dbState.lists.find((l: any) => l.id === listId);
-  const products = dbState.products.filter((p: any) => p.listaId === listId);
+  // Reload database.json if current state is empty to capture any direct writes
+  if (fs.existsSync(DB_FILE) && dbState.suppliers.length === 0) {
+    try {
+      const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      const diskDb = JSON.parse(raw);
+      if (diskDb && Array.isArray(diskDb.suppliers)) {
+        dbState = { ...dbState, ...diskDb };
+      }
+    } catch {}
+  }
+
+  let supplier = dbState.suppliers.find(
+    (s: any) => s.id === supplierId || s.id?.toLowerCase() === supplierId.toLowerCase()
+  );
+  if (!supplier && token) {
+    supplier = dbState.suppliers.find((s: any) => s.tokenAcesso === token);
+  }
+
+  const list = dbState.lists.find(
+    (l: any) => l.id === listId || l.id?.toLowerCase() === listId.toLowerCase()
+  );
+  const products = dbState.products.filter(
+    (p: any) => p.listaId === listId || p.listaId?.toLowerCase() === listId.toLowerCase()
+  );
   const quote = dbState.quotes.find(
-    (q: any) => q.listaId === listId && q.fornecedorId === supplierId
+    (q: any) =>
+      (q.listaId === listId || q.listaId?.toLowerCase() === listId.toLowerCase()) &&
+      (q.fornecedorId === supplierId || q.fornecedorId?.toLowerCase() === supplierId.toLowerCase())
   ) || null;
 
   if (!supplier || !list) {

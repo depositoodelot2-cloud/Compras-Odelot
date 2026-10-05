@@ -127,7 +127,8 @@ export function encodePortalPayload(data: PortalPayloadData): string {
       binary += String.fromCharCode(bytes[i]);
     }
     const b64 = btoa(binary);
-    return encodeURIComponent(b64);
+    // URL-safe base64: replace + with -, / with _, remove padding =
+    return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   } catch (e) {
     console.error('Error encoding portal payload:', e);
     return '';
@@ -136,8 +137,14 @@ export function encodePortalPayload(data: PortalPayloadData): string {
 
 export function decodePortalPayload(encoded: string): PortalPayloadData | null {
   try {
-    const cleanB64 = decodeURIComponent(encoded);
-    const binary = atob(cleanB64);
+    if (!encoded) return null;
+    let clean = decodeURIComponent(encoded).trim();
+    // Convert URL-safe base64 back to standard base64 and restore padding
+    clean = clean.replace(/-/g, '+').replace(/_/g, '/').replace(/\s/g, '+');
+    while (clean.length % 4 !== 0) {
+      clean += '=';
+    }
+    const binary = atob(clean);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i);
@@ -147,6 +154,85 @@ export function decodePortalPayload(encoded: string): PortalPayloadData | null {
   } catch (e) {
     console.error('Error decoding portal payload:', e);
     return null;
+  }
+}
+
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (!text) return false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (err) {
+    console.warn('navigator.clipboard.writeText failed, trying execCommand fallback:', err);
+  }
+
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '-9999px';
+    textarea.setAttribute('readonly', '');
+    document.body.appendChild(textarea);
+    textarea.select();
+    const successful = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return successful;
+  } catch (e) {
+    console.error('Fallback clipboard copy failed:', e);
+    return false;
+  }
+}
+
+/**
+ * Normaliza número de telefone para formato aceito pelo WhatsApp no Brasil (55 + DDD + Número)
+ * Evita duplicação (ex: se já tiver 55, não adiciona outro 55)
+ */
+export function normalizeWhatsAppNumber(rawPhone?: string): string {
+  if (!rawPhone) return '';
+  const digits = rawPhone.replace(/\D/g, '');
+  if (!digits) return '';
+
+  // Se já começar com 55 e tiver 12 ou 13 dígitos: ex: 5511999998888 ou 553133334444
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
+    return digits;
+  }
+
+  // Telefone padrão brasileiro com DDD: 10 dígitos (fixo) ou 11 dígitos (celular)
+  if (digits.length === 10 || digits.length === 11) {
+    return `55${digits}`;
+  }
+
+  // Se já tiver código de país internacional ou tamanho >= 11
+  if (digits.length >= 11) {
+    return digits;
+  }
+
+  // Número incompleto (ex: apenas 8 ou 9 dígitos sem DDD)
+  return '';
+}
+
+/**
+ * Sincroniza dados da cotação com o backend server para que links diretos funcionem em qualquer navegador/dispositivo
+ */
+export async function syncPortalDataToServer(payload: {
+  supplier: any;
+  list: any;
+  products: any[];
+  quote?: any;
+}): Promise<boolean> {
+  try {
+    const res = await fetch('/api/sync-portal-data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('Erro ao sincronizar portal com servidor backend:', err);
+    return false;
   }
 }
 
@@ -181,45 +267,57 @@ export function generateSupplierQuoteLink(
     }>;
   }
 ): string {
-  const origin = window.location.origin;
-  const pathname = window.location.pathname.startsWith('/') ? window.location.pathname : `/${window.location.pathname}`;
-  const url = new URL(pathname, origin);
-  
+  let origin = window.location.origin;
+  if (!origin || origin === 'null' || origin.startsWith('about:')) {
+    origin = window.location.href.split('?')[0].split('#')[0];
+  }
+
+  const url = new URL(origin);
+  url.pathname = '/';
+  url.search = '';
+  url.hash = '';
+
   url.searchParams.set('portal', 'fornecedor');
   url.searchParams.set('supplierId', supplierId);
   url.searchParams.set('listId', listId);
   if (token) url.searchParams.set('token', token);
 
+  // Inclui payload leve nos parâmetros caso caiba dentro do limite seguro de URL (< 1200 chars)
   if (context?.supplier && context?.list) {
     const payload: PortalPayloadData = {
       s: {
         id: context.supplier.id,
         nome: context.supplier.nome,
         email: context.supplier.email,
-        telefone: context.supplier.telefone,
-        contatoNome: context.supplier.contatoNome,
-        senha: context.supplier.senha,
+        telefone: context.supplier.telefone || '',
+        contatoNome: context.supplier.contatoNome || '',
+        senha: context.supplier.senha || 'forn#2026',
       },
       l: {
         id: context.list.id,
         nome: context.list.nome,
         fabrica: context.list.fabrica,
-        descricao: context.list.descricao,
+        descricao: context.list.descricao || '',
       },
-      p: (context.products || []).map((p) => ({
+      p: (context.products || []).slice(0, 20).map((p) => ({
         id: p.id,
         nome: p.nome,
-        marca: p.marca,
-        unidade: p.unidade,
-        quantidade: p.quantidade,
-        prioridade: p.prioridade,
-        observacao: p.observacao,
-        fotoUrl: p.fotoUrl,
+        marca: p.marca || '',
+        unidade: p.unidade || 'un',
+        quantidade: p.quantidade || 1,
+        prioridade: p.prioridade || 'cotacao',
+        observacao: (p.observacao || '').slice(0, 60),
+        fotoUrl: '',
       })),
     };
-    const encoded = encodePortalPayload(payload);
-    if (encoded) {
-      url.searchParams.set('data', encoded);
+
+    try {
+      const encoded = encodePortalPayload(payload);
+      if (encoded && encoded.length < 1200) {
+        url.searchParams.set('data', encoded);
+      }
+    } catch (e) {
+      console.warn('Error encoding lightweight payload:', e);
     }
   }
 
@@ -242,15 +340,27 @@ export function buildWhatsAppQuoteMessage(
       `• *Senha:* ${senha || 'forn#2026'}\n`;
   }
 
-  return encodeURIComponent(
+  return (
     `Olá ${supplierName}, tudo bem?\n\n` +
     `Aqui é do setor de compras. Estamos cotando uma lista de materiais da fábrica *${factoryName}* contendo *${itemCount} itens*.\n\n` +
     `Para agilizar e garantir o melhor preço com total sigilo, preparamos seu portal exclusivo para preencher seus preços, quantidades e marcas disponíveis:\n` +
     `👉 Acesse sua cotação aqui: ${link}\n` +
     credentialsText +
-    `\nBasta acessar o link, entrar com seu e-mail e senha, preencher os valores e marcas e clicar em *Terminei a Cotação* no final da lista.\n\n` +
+    `\nBasta acessar o link acima, entrar com seu e-mail e senha, preencher os valores e marcas e clicar em *Terminei a Cotação* no final da lista.\n\n` +
     `Aguardamos seu retorno! Obrigado.`
   );
+}
+
+export function buildWhatsAppQuoteUrl(
+  phone: string | undefined,
+  message: string
+): string {
+  const cleanPhone = normalizeWhatsAppNumber(phone);
+  const encodedMsg = encodeURIComponent(message);
+  if (cleanPhone) {
+    return `https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encodedMsg}`;
+  }
+  return `https://api.whatsapp.com/send?text=${encodedMsg}`;
 }
 
 export const USER_AVATAR_COLORS = [

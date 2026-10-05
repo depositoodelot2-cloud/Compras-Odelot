@@ -20,7 +20,9 @@ import {
   Printer,
   Edit3,
   Package,
-  X
+  X,
+  ExternalLink,
+  Check,
 } from 'lucide-react';
 import {
   PurchaseList,
@@ -37,7 +39,11 @@ import {
   PRIORITY_CONFIG,
   generateSupplierQuoteLink,
   buildWhatsAppQuoteMessage,
+  buildWhatsAppQuoteUrl,
+  copyTextToClipboard,
+  syncPortalDataToServer,
 } from '../utils';
+import { saveDocument, STORAGE_KEYS } from '../firebase';
 
 interface QuotesViewProps {
   lists: PurchaseList[];
@@ -89,6 +95,9 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
 }) => {
   const [subTab, setSubTab] = useState<SubTab>('cotar');
   const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedEmail, setCopiedEmail] = useState(false);
+  const [copiedSenha, setCopiedSenha] = useState(false);
+  const [copyToast, setCopyToast] = useState<string | null>(null);
 
   const activeList = lists.find((l) => l.id === activeListId) || lists[0] || DEFAULT_EMPTY_LIST;
   const listProducts = useMemo(
@@ -367,21 +376,21 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
     return wonProductsBySupplier[activeOrderSupplier.id] || [];
   }, [activeOrderSupplier, wonProductsBySupplier]);
 
-  // Compute total order value for active supplier based on orderQuantities
   const totalOrderValue = useMemo(() => {
     return wonItemsForActiveSupplier.reduce((sum, item) => {
       const qty =
         orderQuantities[item.product.id] !== undefined
           ? orderQuantities[item.product.id]
-          : item.product.quantidade;
+          : item.supplierQty;
       return sum + item.price * Math.max(0, qty);
     }, 0);
   }, [wonItemsForActiveSupplier, orderQuantities]);
 
   const handleUpdateOrderQty = (productId: string, delta: number) => {
     setOrderQuantities((prev) => {
-      const prod = listProducts.find((p) => p.id === productId);
-      const current = prev[productId] !== undefined ? prev[productId] : (prod?.quantidade || 1);
+      const wonItem = wonItemsForActiveSupplier.find((item) => item.product.id === productId);
+      const defaultQty = wonItem ? wonItem.supplierQty : 1;
+      const current = prev[productId] !== undefined ? prev[productId] : defaultQty;
       const next = Math.max(0, current + delta);
       return { ...prev, [productId]: next };
     });
@@ -406,7 +415,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
       const qty =
         orderQuantities[item.product.id] !== undefined
           ? orderQuantities[item.product.id]
-          : item.product.quantidade;
+          : item.supplierQty;
       if (qty > 0) {
         const sub = item.price * qty;
         msg += `${idx + 1}. *${item.product.nome}*\n`;
@@ -435,7 +444,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
       const qty =
         orderQuantities[item.product.id] !== undefined
           ? orderQuantities[item.product.id]
-          : item.product.quantidade;
+          : item.supplierQty;
       if (qty > 0) {
         const sub = item.price * qty;
         msg += `${idx + 1}. ${item.product.nome}\n`;
@@ -469,7 +478,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
           const qty =
             orderQuantities[item.product.id] !== undefined
               ? orderQuantities[item.product.id]
-              : item.product.quantidade;
+              : item.supplierQty;
           return [
             item.product.id,
             {
@@ -508,6 +517,21 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
     setTimeout(() => setIsSavedRecently(false), 2000);
   };
 
+  // Sincroniza dados da cotação com o backend e Firestore em tempo real
+  useEffect(() => {
+    if (activeSupplier && activeList) {
+      syncPortalDataToServer({
+        supplier: activeSupplier,
+        list: activeList,
+        products: listProducts,
+        quote: existingQuote || null,
+      });
+      saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier);
+      saveDocument('lists', STORAGE_KEYS.LISTS, activeList);
+      listProducts.forEach((p) => saveDocument('products', STORAGE_KEYS.PRODUCTS, p));
+    }
+  }, [activeSupplier?.id, activeList?.id, listProducts.length]);
+
   const supplierQuoteLink = activeSupplier
     ? generateSupplierQuoteLink(
         activeSupplier.id,
@@ -521,15 +545,64 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
       )
     : '';
 
-  const handleCopyLink = () => {
-    if (!supplierQuoteLink) return;
-    navigator.clipboard.writeText(supplierQuoteLink);
-    setCopiedLink(true);
-    setTimeout(() => setCopiedLink(false), 2000);
+  const handleCopyLink = async () => {
+    if (!supplierQuoteLink || !activeSupplier || !activeList) return;
+
+    // Sincroniza ativamente com o servidor e Firestore antes de copiar
+    syncPortalDataToServer({
+      supplier: activeSupplier,
+      list: activeList,
+      products: listProducts,
+      quote: existingQuote || null,
+    });
+    saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier);
+    saveDocument('lists', STORAGE_KEYS.LISTS, activeList);
+
+    const success = await copyTextToClipboard(supplierQuoteLink);
+    if (success) {
+      setCopiedLink(true);
+      setCopyToast('Link da cotação copiado com sucesso! Você pode colar em qualquer navegador para testar.');
+      setTimeout(() => setCopiedLink(false), 2500);
+      setTimeout(() => setCopyToast(null), 3500);
+    }
   };
 
-  const handleOpenWhatsApp = () => {
-    if (!activeSupplier) return;
+  const handleOpenDirectLink = async () => {
+    if (!supplierQuoteLink || !activeSupplier || !activeList) return;
+
+    // Sincroniza dados antes de abrir a aba
+    await syncPortalDataToServer({
+      supplier: activeSupplier,
+      list: activeList,
+      products: listProducts,
+      quote: existingQuote || null,
+    });
+    await saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier);
+    await saveDocument('lists', STORAGE_KEYS.LISTS, activeList);
+
+    // Abre em nova aba sem bloqueio de pop-up
+    const a = document.createElement('a');
+    a.href = supplierQuoteLink;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const handleOpenWhatsApp = async () => {
+    if (!activeSupplier || !activeList) return;
+
+    // Garante que o servidor backend e Firestore possuam a cotação ativa
+    await syncPortalDataToServer({
+      supplier: activeSupplier,
+      list: activeList,
+      products: listProducts,
+      quote: existingQuote || null,
+    });
+    await saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier);
+    await saveDocument('lists', STORAGE_KEYS.LISTS, activeList);
+
     const msg = buildWhatsAppQuoteMessage(
       activeSupplier.nome,
       activeList.fabrica,
@@ -538,9 +611,19 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
       activeSupplier.email,
       activeSupplier.senha || 'forn#2026'
     );
-    const phone = activeSupplier.telefone.replace(/\D/g, '');
-    const url = `https://wa.me/55${phone}?text=${msg}`;
-    window.open(url, '_blank');
+
+    const url = buildWhatsAppQuoteUrl(activeSupplier.telefone, msg);
+
+    setCopyToast('Abrindo WhatsApp para enviar a cotação...');
+    setTimeout(() => setCopyToast(null), 3000);
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
   return (
@@ -809,12 +892,14 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                     </span>
                     <button
                       type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(activeSupplier.email);
+                      onClick={async () => {
+                        await copyTextToClipboard(activeSupplier.email);
+                        setCopiedEmail(true);
+                        setTimeout(() => setCopiedEmail(false), 2000);
                       }}
                       className="text-[10px] text-blue-600 hover:text-blue-800 font-bold ml-2 underline cursor-pointer shrink-0"
                     >
-                      Copiar
+                      {copiedEmail ? 'Copiado!' : 'Copiar'}
                     </button>
                   </div>
                   <div className="flex items-center justify-between pt-1.5 border-t border-slate-100">
@@ -823,31 +908,49 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                     </span>
                     <button
                       type="button"
-                      onClick={() => {
-                        navigator.clipboard.writeText(activeSupplier.senha || 'forn#2026');
+                      onClick={async () => {
+                        await copyTextToClipboard(activeSupplier.senha || 'forn#2026');
+                        setCopiedSenha(true);
+                        setTimeout(() => setCopiedSenha(false), 2000);
                       }}
                       className="text-[10px] text-blue-600 hover:text-blue-800 font-bold ml-2 underline cursor-pointer shrink-0"
                     >
-                      Copiar
+                      {copiedSenha ? 'Copiado!' : 'Copiar'}
                     </button>
                   </div>
                 </div>
 
-                {/* 3 Action Buttons matching Screenshot 3: Copiar Link, WhatsApp, Ver Portal */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+                {/* 4 Action Buttons: Copiar Link, Abrir Link, WhatsApp, Ver Portal */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
                   {/* Copiar Link */}
                   <button
                     onClick={handleCopyLink}
                     className="py-2.5 px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-2xs"
+                    title="Copiar link da cotação para a área de transferência"
                   >
-                    <Copy className="w-4 h-4 text-blue-600" />
-                    <span>{copiedLink ? 'Copiado!' : 'Copiar Link'}</span>
+                    {copiedLink ? (
+                      <Check className="w-4 h-4 text-emerald-600" />
+                    ) : (
+                      <Copy className="w-4 h-4 text-blue-600" />
+                    )}
+                    <span>{copiedLink ? 'Link Copiado!' : 'Copiar Link'}</span>
+                  </button>
+
+                  {/* Abrir Link em Nova Aba */}
+                  <button
+                    onClick={handleOpenDirectLink}
+                    className="py-2.5 px-3 rounded-xl border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-blue-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-2xs"
+                    title="Abrir o link direto do fornecedor em uma nova aba do navegador"
+                  >
+                    <ExternalLink className="w-4 h-4 text-blue-600" />
+                    <span>Abrir Link</span>
                   </button>
 
                   {/* WhatsApp */}
                   <button
                     onClick={handleOpenWhatsApp}
                     className="py-2.5 px-3 rounded-xl bg-[#25D366] hover:bg-[#20ba59] text-white text-xs font-black flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs"
+                    title="Enviar cotação e dados de login para o WhatsApp do fornecedor"
                   >
                     <MessageSquare className="w-4 h-4" />
                     <span>WhatsApp</span>
@@ -857,11 +960,20 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                   <button
                     onClick={() => onOpenPortalModal(activeSupplier, activeList)}
                     className="py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-black text-white text-xs font-black flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs"
+                    title="Simular visualização do portal dentro do sistema"
                   >
                     <Eye className="w-4 h-4 text-emerald-400" />
                     <span>Ver Portal</span>
                   </button>
                 </div>
+
+                {/* Feedback Toast Notification */}
+                {copyToast && (
+                  <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs flex items-center gap-2 animate-in fade-in duration-200">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span className="font-medium">{copyToast}</span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1467,7 +1579,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                   const qtyToBuy =
                     orderQuantities[item.product.id] !== undefined
                       ? orderQuantities[item.product.id]
-                      : item.product.quantidade;
+                      : item.supplierQty;
                   const subtotal = item.price * qtyToBuy;
 
                   return (
@@ -1485,6 +1597,9 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                             <h4 className="text-sm font-bold text-slate-900 leading-snug">
                               {item.product.nome}
                             </h4>
+                            <div className="text-[11px] text-blue-700 font-bold mt-0.5">
+                              Qtd informada pelo fornecedor: {item.supplierQty} {item.product.unidade}
+                            </div>
                           </div>
                         </div>
 
@@ -1573,7 +1688,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                           Qtd informada pelo fornecedor: <strong className="text-slate-700">{item.supplierQty} {item.product.unidade}</strong>
                         </div>
                         <div className="text-[10.5px] text-slate-400">
-                          Necessidade inicial da loja: {item.product.quantidade} {item.product.unidade}
+                          Estoque Atual: {item.product.quantidade} {item.product.unidade}
                         </div>
                       </div>
                     </div>

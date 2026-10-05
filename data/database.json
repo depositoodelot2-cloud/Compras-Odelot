@@ -1,7 +1,22 @@
 {
-  "lists": [],
+  "lists": [
+    {
+      "id": "test-list-1",
+      "nome": "Lista Teste",
+      "fabrica": "Tigre"
+    }
+  ],
   "products": [],
-  "suppliers": [],
+  "suppliers": [
+    {
+      "id": "test-sup-1",
+      "nome": "Distribuidora Teste",
+      "email": "teste@distribuidora.com",
+      "senha": "forn#2026",
+      "tokenAcesso": "tok-test-123",
+      "telefone": "(11) 98765-4321"
+    }
+  ],
   "quotes": [],
   "users": [],
   "catalog": []

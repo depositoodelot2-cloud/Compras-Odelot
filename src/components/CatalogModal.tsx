@@ -9,7 +9,8 @@ import {
   MoreVertical,
   Tag,
   Sparkles,
-  ZoomIn
+  ZoomIn,
+  ScanBarcode,
 } from 'lucide-react';
 import { CatalogProduct, Priority, PurchaseList, UserProfile } from '../types';
 import { getUserColorHex } from '../utils';
@@ -296,6 +297,17 @@ export const CatalogModal: React.FC<CatalogModalProps> = ({
                             return !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1;
                           })()}
                         </span>
+
+                        {/* Código de barras após a quantidade quando presente */}
+                        {item.codigoBarras && item.codigoBarras.trim() && (
+                          <span
+                            className="inline-flex items-center gap-1 text-[11px] font-mono font-semibold text-slate-500 bg-slate-100 hover:bg-slate-200/80 px-1.5 py-0.5 rounded-md border border-slate-200/80 leading-none transition-colors"
+                            title={`Código de Barras: ${item.codigoBarras}`}
+                          >
+                            <ScanBarcode className="w-3 h-3 text-slate-400 shrink-0" />
+                            <span>{item.codigoBarras}</span>
+                          </span>
+                        )}
                       </div>
                     </div>
 

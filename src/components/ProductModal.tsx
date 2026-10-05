@@ -80,7 +80,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
       setCodigoBarras(productToEdit.codigoBarras || '');
       setNome(capitalizeWords(productToEdit.nome || ''));
       setMarca(productToEdit.marca || activeList?.fabrica || '');
-      setQuantidade(productToEdit.quantidade || 1);
+      setQuantidade(productToEdit.quantidade !== undefined && productToEdit.quantidade !== null ? productToEdit.quantidade : 1);
       setUnidade(productToEdit.unidade || 'unidade(s)');
       setFotoUrl(productToEdit.fotoUrl || '');
     } else {
@@ -121,11 +121,13 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   };
 
   const handleBarcodeScanned = (scannedCode: string) => {
-    setCodigoBarras(scannedCode);
+    const cleanCode = scannedCode.trim();
+    setCodigoBarras(cleanCode);
+    setIsBarcodeScannerOpen(false);
 
     // If catalog has an item with this barcode, auto-populate details
     const matched = catalog.find(
-      (c) => c.codigoBarras && c.codigoBarras.trim() === scannedCode.trim()
+      (c) => c.codigoBarras && c.codigoBarras.trim() === cleanCode
     );
     if (matched) {
       if (!nome.trim()) setNome(capitalizeWords(matched.nome));
@@ -145,7 +147,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
     const file = e.target.files?.[0];
     if (file) {
       try {
-        const compressed = await compressImage(file, 1200, 1200, 0.85);
+        const compressed = await compressImage(file, 640, 640, 0.70);
         setFotoUrl(compressed);
       } catch (err) {
         console.warn('Erro ao processar imagem:', err);
@@ -165,7 +167,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
   };
 
   const handleQuantityDecrement = () => {
-    setQuantidade((prev) => (prev > 1 ? prev - 1 : 1));
+    setQuantidade((prev) => (prev > 0 ? (prev > 1 ? prev - 1 : 0) : 0));
   };
 
   const handleSaveAction = (saveToCatalog: boolean, onlyCatalog = false) => {
@@ -176,6 +178,9 @@ export const ProductModal: React.FC<ProductModalProps> = ({
     const user = users.find((u) => u.id === selectedUserId) || currentUser;
 
     if (!onlyCatalog) {
+      const parsedQtd = typeof quantidade === 'number' ? quantidade : parseFloat(String(quantidade));
+      const finalQtd = isNaN(parsedQtd) || parsedQtd < 0 ? 0 : parsedQtd;
+
       onSave(
         {
           id: productToEdit ? productToEdit.id : undefined,
@@ -183,7 +188,7 @@ export const ProductModal: React.FC<ProductModalProps> = ({
           nome: capitalizeWords(nome.trim()),
           marca: marca.trim() || activeList?.fabrica || 'Geral',
           unidade,
-          quantidade: Number(quantidade) > 0 ? Number(quantidade) : 1,
+          quantidade: finalQtd,
           prioridade,
           criadoPor: {
             id: user?.id || currentUser?.id || 'admin',
@@ -459,9 +464,9 @@ export const ProductModal: React.FC<ProductModalProps> = ({
               <div className="flex items-baseline gap-2">
                 <input
                   type="number"
-                  min="0.01"
+                  min="0"
                   step="any"
-                  value={quantidade}
+                  value={quantidade === 0 ? '0' : (quantidade || '')}
                   onFocus={(e) => {
                     const target = e.currentTarget;
                     setTimeout(() => {
@@ -478,7 +483,15 @@ export const ProductModal: React.FC<ProductModalProps> = ({
                       } catch {}
                     }, 50);
                   }}
-                  onChange={(e) => setQuantidade(parseFloat(e.target.value) || 1)}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '') {
+                      setQuantidade(0);
+                    } else {
+                      const num = parseFloat(val);
+                      setQuantidade(isNaN(num) ? 0 : Math.max(0, num));
+                    }
+                  }}
                   className="w-16 text-center text-2xl font-black text-blue-600 bg-transparent outline-hidden font-mono"
                 />
                 <span className="text-xs font-bold text-slate-500">
