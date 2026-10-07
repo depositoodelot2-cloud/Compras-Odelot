@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Plus, Barcode, CheckCircle2, ChevronDown, Check, AlertCircle, RefreshCw } from 'lucide-react';
 import {
   PurchaseList,
@@ -48,7 +48,7 @@ import { SupplierPortalView } from './components/SupplierPortalView';
 import { PrintQuoteModal } from './components/PrintQuoteModal';
 import { BottomNav } from './components/BottomNav';
 import { UserSwitchModal } from './components/UserSwitchModal';
-import { decodePortalPayload, syncPortalDataToServer, capitalizeWords } from './utils';
+import { decodePortalPayload, syncPortalDataToServer, capitalizeWords, resolveProductImage, mergeQuoteItems } from './utils';
 import { LoginView } from './components/LoginView';
 import { BarcodeScannerModal } from './components/BarcodeScannerModal';
 import { ClearCacheModal } from './components/ClearCacheModal';
@@ -308,6 +308,115 @@ export default function App() {
       unsubCatalog();
     };
   }, []);
+
+  // Real-time synchronization helper for quotes from backend
+  const handleRefreshQuotes = useCallback(async () => {
+    try {
+      const res = await fetch('/api/data');
+      if (res.ok) {
+        const serverDb = await res.json();
+        if (serverDb && Array.isArray(serverDb.quotes)) {
+          setQuotes((prev) => {
+            const map = new Map(prev.map((q) => [q.id, q]));
+            serverDb.quotes.forEach((sq: SupplierQuote) => {
+              const existing = map.get(sq.id);
+              if (existing) {
+                map.set(sq.id, {
+                  ...existing,
+                  ...sq,
+                  itens: mergeQuoteItems(existing.itens, sq.itens),
+                });
+              } else {
+                map.set(sq.id, sq);
+              }
+            });
+            return Array.from(map.values());
+          });
+          setLocal(STORAGE_KEYS.QUOTES, serverDb.quotes);
+        }
+      }
+    } catch (e) {
+      console.warn('Erro ao sincronizar cotações do servidor:', e);
+    }
+  }, []);
+
+  // Live synchronization across tabs, window focus, and background polling
+  useEffect(() => {
+    let channel: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      channel = new BroadcastChannel('cotacoes_live_sync');
+      channel.onmessage = (event) => {
+        if (event.data?.type === 'quote_updated' && event.data.quote) {
+          const updatedQuote = event.data.quote as SupplierQuote;
+          setQuotes((prev) => {
+            const idx = prev.findIndex(
+              (q) =>
+                q.id === updatedQuote.id ||
+                (q.listaId === updatedQuote.listaId && q.fornecedorId === updatedQuote.fornecedorId)
+            );
+            if (idx >= 0) {
+              const copy = [...prev];
+              copy[idx] = {
+                ...copy[idx],
+                ...updatedQuote,
+                itens: mergeQuoteItems(copy[idx].itens, updatedQuote.itens),
+              };
+              return copy;
+            }
+            return [updatedQuote, ...prev];
+          });
+        }
+      };
+    }
+
+    const onFocus = () => handleRefreshQuotes();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        handleRefreshQuotes();
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        handleRefreshQuotes();
+      }
+    }, 4000);
+
+    return () => {
+      if (channel) channel.close();
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      clearInterval(interval);
+    };
+  }, [handleRefreshQuotes]);
+
+  // Auto-heal missing product photos from catalog or other products
+  useEffect(() => {
+    if (products.length === 0) return;
+    let hasChanges = false;
+    const updated = products.map((p) => {
+      if (!p.fotoUrl) {
+        const resolved = resolveProductImage(p, catalog, products);
+        if (resolved) {
+          hasChanges = true;
+          return { ...p, fotoUrl: resolved };
+        }
+      }
+      return p;
+    });
+
+    if (hasChanges) {
+      setProducts(updated);
+      products.forEach((oldP, idx) => {
+        const newP = updated[idx];
+        if (!oldP.fotoUrl && newP.fotoUrl) {
+          saveDocument('products', STORAGE_KEYS.PRODUCTS, newP).catch(() => {});
+        }
+      });
+    }
+  }, [catalog, products.length]);
 
   // Resolve supplier portal data with high availability (Payload -> Server API -> Firestore -> Local)
   useEffect(() => {
@@ -1013,14 +1122,37 @@ export default function App() {
   const handleSaveQuote = async (quote: SupplierQuote) => {
     await saveDocument('quotes', STORAGE_KEYS.QUOTES, quote);
     setQuotes((prev) => {
-      const idx = prev.findIndex((q) => q.id === quote.id);
+      const idx = prev.findIndex(
+        (q) =>
+          q.id === quote.id ||
+          (q.listaId === quote.listaId && q.fornecedorId === quote.fornecedorId)
+      );
       if (idx >= 0) {
         const copy = [...prev];
-        copy[idx] = quote;
+        const mergedItens = mergeQuoteItems(copy[idx].itens, quote.itens);
+        copy[idx] = {
+          ...copy[idx],
+          ...quote,
+          id: copy[idx].id || quote.id,
+          itens: mergedItens,
+        };
         return copy;
       }
       return [quote, ...prev];
     });
+
+    try {
+      await fetch('/api/save-quote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(quote),
+      });
+      if (typeof BroadcastChannel !== 'undefined') {
+        const channel = new BroadcastChannel('cotacoes_live_sync');
+        channel.postMessage({ type: 'quote_updated', quote });
+        channel.close();
+      }
+    } catch {}
   };
 
   // Handlers for Users & Authentication
@@ -1153,6 +1285,8 @@ export default function App() {
       },
       criadoEm: new Date().toISOString(),
       status: 'pendente',
+      codigoBarras: item.codigoBarras,
+      fotoUrl: item.fotoUrl,
     };
     await saveDocument('products', STORAGE_KEYS.PRODUCTS, newProd);
     setProducts((prev) => [newProd, ...prev]);
@@ -1495,6 +1629,7 @@ export default function App() {
               products={products}
               suppliers={suppliers}
               quotes={quotes}
+              catalog={catalog}
               currentUser={currentUser}
               onSaveQuote={handleSaveQuote}
               onBackToList={() => setCurrentTab('lista')}
@@ -1512,6 +1647,7 @@ export default function App() {
               }}
               onEditSupplier={handleOpenEditSupplier}
               onSelectWinner={handleSelectProductWinner}
+              onRefreshQuotes={handleRefreshQuotes}
             />
           </div>
         )}

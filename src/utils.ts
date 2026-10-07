@@ -1,4 +1,4 @@
-import { Priority } from './types';
+import { Priority, SupplierQuote, QuoteItemResponse, ProductItem } from './types';
 
 export function formatCurrency(value: number): string {
   return new Intl.NumberFormat('pt-BR', {
@@ -268,12 +268,19 @@ export function generateSupplierQuoteLink(
   }
 ): string {
   let origin = window.location.origin;
+  let pathname = window.location.pathname || '/';
   if (!origin || origin === 'null' || origin.startsWith('about:')) {
-    origin = window.location.href.split('?')[0].split('#')[0];
+    const rawUrl = window.location.href.split('?')[0].split('#')[0];
+    try {
+      const parsed = new URL(rawUrl);
+      origin = parsed.origin;
+      pathname = parsed.pathname || '/';
+    } catch {
+      origin = rawUrl;
+    }
   }
 
-  const url = new URL(origin);
-  url.pathname = '/';
+  const url = new URL(pathname, origin);
   url.search = '';
   url.hash = '';
 
@@ -358,10 +365,71 @@ export function buildWhatsAppQuoteUrl(
   const cleanPhone = normalizeWhatsAppNumber(phone);
   const encodedMsg = encodeURIComponent(message);
   if (cleanPhone) {
-    return `https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encodedMsg}`;
+    return `https://wa.me/${cleanPhone}?text=${encodedMsg}`;
   }
-  return `https://api.whatsapp.com/send?text=${encodedMsg}`;
+  return `https://wa.me/?text=${encodedMsg}`;
 }
+
+/**
+ * Resolve imagem de produto buscando em fotoUrl própria, no catálogo permanente ou em outros produtos
+ */
+export function resolveProductImage(
+  product?: { fotoUrl?: string; nome?: string; codigoBarras?: string } | null,
+  catalog?: Array<{ fotoUrl?: string; nome?: string; codigoBarras?: string }> | null,
+  allProducts?: Array<{ fotoUrl?: string; nome?: string; codigoBarras?: string }> | null
+): string | undefined {
+  if (!product) return undefined;
+  if (product.fotoUrl && product.fotoUrl.trim()) {
+    return product.fotoUrl;
+  }
+  const cleanBarcode = (product.codigoBarras || '').trim();
+  const cleanName = (product.nome || '').trim().toLowerCase();
+
+  // 1. Catálogo por código de barras
+  if (cleanBarcode && catalog) {
+    const match = catalog.find((c) => c.codigoBarras && c.codigoBarras.trim() === cleanBarcode && c.fotoUrl);
+    if (match?.fotoUrl) return match.fotoUrl;
+  }
+
+  // 2. Outros produtos por código de barras
+  if (cleanBarcode && allProducts) {
+    const match = allProducts.find((p) => p.codigoBarras && p.codigoBarras.trim() === cleanBarcode && p.fotoUrl);
+    if (match?.fotoUrl) return match.fotoUrl;
+  }
+
+  // 3. Catálogo por nome exato
+  if (cleanName && catalog) {
+    const match = catalog.find((c) => c.nome && c.nome.trim().toLowerCase() === cleanName && c.fotoUrl);
+    if (match?.fotoUrl) return match.fotoUrl;
+  }
+
+  // 4. Outros produtos por nome exato
+  if (cleanName && allProducts) {
+    const match = allProducts.find((p) => p.nome && p.nome.trim().toLowerCase() === cleanName && p.fotoUrl);
+    if (match?.fotoUrl) return match.fotoUrl;
+  }
+
+  // 5. Comparação aproximada (sem sufixos ou com início similar)
+  if (cleanName && cleanName.length >= 4) {
+    if (catalog) {
+      const match = catalog.find((c) => c.fotoUrl && c.nome && (
+        c.nome.trim().toLowerCase().startsWith(cleanName) ||
+        cleanName.startsWith(c.nome.trim().toLowerCase())
+      ));
+      if (match?.fotoUrl) return match.fotoUrl;
+    }
+    if (allProducts) {
+      const match = allProducts.find((p) => p.fotoUrl && p.nome && (
+        p.nome.trim().toLowerCase().startsWith(cleanName) ||
+        cleanName.startsWith(p.nome.trim().toLowerCase())
+      ));
+      if (match?.fotoUrl) return match.fotoUrl;
+    }
+  }
+
+  return undefined;
+}
+
 
 export const USER_AVATAR_COLORS = [
   '#F59E0B', // Amarelo/Dourado
@@ -396,4 +464,84 @@ export function getUserColorHex(cor?: string): string {
 export function capitalizeWords(str: string): string {
   if (!str) return '';
   return str.replace(/(?:^|[\s/(\-–—.'"])([a-zà-öø-ÿ])/g, (match) => match.toUpperCase());
+}
+
+/**
+ * Recupera a resposta de cotação de um produto dentro da cotação do fornecedor,
+ * buscando por ID direto, e fallback inteligente por código de barras ou nome do produto.
+ */
+export function getProductQuoteResponse(
+  quote: SupplierQuote | undefined | null,
+  product: ProductItem,
+  allProducts?: ProductItem[]
+): QuoteItemResponse | undefined {
+  if (!quote || !quote.itens || !product) return undefined;
+
+  // 1. Match direto por ID do produto
+  const direct = quote.itens[product.id];
+  if (direct && Number(direct.precoUnitario) > 0) return direct;
+
+  const normName = (product.nome || '').trim().toLowerCase();
+  const cleanBarcode = (product.codigoBarras || '').trim();
+
+  // 2. Procura em outros itens da cotação que pertençam ao mesmo produto (por nome ou código de barras)
+  for (const [pId, item] of Object.entries(quote.itens)) {
+    if (Number(item?.precoUnitario) > 0) {
+      if (pId === product.id) return item;
+
+      // Se temos a lista de todos os produtos, cruza os dados
+      const otherProd = allProducts?.find((p) => p.id === pId);
+      if (otherProd) {
+        if (normName && (otherProd.nome || '').trim().toLowerCase() === normName) {
+          return item;
+        }
+        if (cleanBarcode && cleanBarcode !== 'undefined' && otherProd.codigoBarras === cleanBarcode) {
+          return item;
+        }
+      }
+    }
+  }
+
+  return direct;
+}
+
+/**
+ * Mescla as respostas de itens de cotação de forma inteligente.
+ * Se o item de entrada tiver preço > 0, atualiza.
+ * Se o item de entrada vier com preço 0, mas já existia um preço > 0 cotado anteriormente,
+ * PRESERVA o preço existente para não apagar a cotação já preenchida!
+ */
+export function mergeQuoteItems(
+  existingItens: Record<string, QuoteItemResponse> = {},
+  incomingItens: Record<string, QuoteItemResponse> = {}
+): Record<string, QuoteItemResponse> {
+  const merged: Record<string, QuoteItemResponse> = { ...existingItens };
+  for (const [key, val] of Object.entries(incomingItens || {})) {
+    const existing = merged[key];
+    if (!existing) {
+      merged[key] = val;
+    } else {
+      const incomingPrice = Number(val?.precoUnitario) || 0;
+      const existingPrice = Number(existing?.precoUnitario) || 0;
+      const finalPrice = incomingPrice > 0 ? incomingPrice : existingPrice;
+      const finalQty =
+        Number(val?.quantidade) > 0
+          ? val.quantidade
+          : Number(existing.quantidade) > 0
+          ? existing.quantidade
+          : 1;
+      const finalMa = (val?.ma || '').trim() || (existing.ma || '').trim() || '';
+      const finalObs = (val?.observacao || '').trim() || (existing.observacao || '').trim() || '';
+
+      merged[key] = {
+        ...existing,
+        ...val,
+        precoUnitario: finalPrice,
+        quantidade: finalQty,
+        ma: finalMa,
+        observacao: finalObs,
+      };
+    }
+  }
+  return merged;
 }

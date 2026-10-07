@@ -23,6 +23,7 @@ import {
   X,
   ExternalLink,
   Check,
+  RefreshCw,
 } from 'lucide-react';
 import {
   PurchaseList,
@@ -31,6 +32,7 @@ import {
   SupplierQuote,
   QuoteItemResponse,
   UserProfile,
+  CatalogProduct,
 } from '../types';
 import {
   formatCurrency,
@@ -42,6 +44,9 @@ import {
   buildWhatsAppQuoteUrl,
   copyTextToClipboard,
   syncPortalDataToServer,
+  resolveProductImage,
+  getProductQuoteResponse,
+  mergeQuoteItems,
 } from '../utils';
 import { saveDocument, STORAGE_KEYS } from '../firebase';
 
@@ -53,6 +58,7 @@ interface QuotesViewProps {
   products: ProductItem[];
   suppliers: Supplier[];
   quotes: SupplierQuote[];
+  catalog?: CatalogProduct[];
   currentUser: UserProfile;
   onSaveQuote: (quote: SupplierQuote) => void;
   onBackToList: () => void;
@@ -61,6 +67,7 @@ interface QuotesViewProps {
   onOpenNewSupplier: () => void;
   onEditSupplier?: (supplier: Supplier) => void;
   onSelectWinner?: (productId: string, supplierId: string) => void;
+  onRefreshQuotes?: () => Promise<void> | void;
 }
 
 type SubTab = 'cotar' | 'disputa' | 'listas';
@@ -84,6 +91,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   products,
   suppliers,
   quotes,
+  catalog = [],
   currentUser,
   onSaveQuote,
   onBackToList,
@@ -92,12 +100,26 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   onOpenNewSupplier,
   onEditSupplier,
   onSelectWinner,
+  onRefreshQuotes,
 }) => {
   const [subTab, setSubTab] = useState<SubTab>('cotar');
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedEmail, setCopiedEmail] = useState(false);
   const [copiedSenha, setCopiedSenha] = useState(false);
   const [copyToast, setCopyToast] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleManualRefresh = async () => {
+    if (!onRefreshQuotes || isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      await onRefreshQuotes();
+      setCopyToast('Cotações atualizadas em tempo real!');
+      setTimeout(() => setCopyToast(null), 2500);
+    } finally {
+      setTimeout(() => setIsRefreshing(false), 600);
+    }
+  };
 
   const activeList = lists.find((l) => l.id === activeListId) || lists[0] || DEFAULT_EMPTY_LIST;
   const listProducts = useMemo(
@@ -259,6 +281,51 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
     });
   };
 
+  // Keyboard navigation: Enter moves to next input (Preço -> Qtd -> Marca -> Obs.: -> Próximo Card)
+  const handleInputKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+    cardIndex: number,
+    fieldIndex: number // 0: Preço, 1: Qtd, 2: Marca, 3: Obs.:
+  ) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const nextField = e.shiftKey ? fieldIndex - 1 : fieldIndex + 1;
+      let targetCard = cardIndex;
+      let targetField = nextField;
+
+      if (nextField > 3) {
+        // Move to first field (Preço) of next card
+        targetCard = cardIndex + 1;
+        targetField = 0;
+      } else if (nextField < 0) {
+        // Move to last field (Obs.:) of previous card
+        targetCard = cardIndex - 1;
+        targetField = 3;
+      }
+
+      if (targetCard < 0 || targetCard >= listProducts.length) return;
+
+      const nextInput = document.querySelector<HTMLInputElement>(
+        `[data-nav-input="${targetCard}-${targetField}"]`
+      );
+
+      if (nextInput) {
+        nextInput.focus();
+        setTimeout(() => {
+          try {
+            nextInput.select();
+            if ('setSelectionRange' in nextInput) {
+              nextInput.setSelectionRange(0, nextInput.value.length);
+            }
+          } catch {}
+        }, 20);
+        try {
+          nextInput.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } catch {}
+      }
+    }
+  };
+
   // Quoted count
   const quotedCount = useMemo(() => {
     return Object.values(quoteItems).filter((i) => i.precoUnitario > 0).length;
@@ -272,10 +339,30 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
     }, 0);
   }, [quoteItems]);
 
-  // Quotes for this list (for Disputa tab)
+  // Quotes for this list (for Disputa tab) - sorted by latest and merged by supplier
   const quotesForList = useMemo(() => {
     if (!activeList?.id) return [];
-    return quotes.filter((q) => q.listaId === activeList.id);
+    const map = new Map<string, SupplierQuote>();
+    // Sort quotes by atualizadoEm descending so the newest/most complete comes first
+    const sorted = [...quotes]
+      .filter((q) => q.listaId === activeList.id)
+      .sort((a, b) => {
+        const tA = a.atualizadoEm ? new Date(a.atualizadoEm).getTime() : 0;
+        const tB = b.atualizadoEm ? new Date(b.atualizadoEm).getTime() : 0;
+        return tB - tA;
+      });
+
+    sorted.forEach((q) => {
+      if (!map.has(q.fornecedorId)) {
+        map.set(q.fornecedorId, q);
+      } else {
+        const existing = map.get(q.fornecedorId)!;
+        const mergedItens = mergeQuoteItems(existing.itens, q.itens);
+        map.set(q.fornecedorId, { ...existing, itens: mergedItens });
+      }
+    });
+
+    return Array.from(map.values());
   }, [quotes, activeList?.id]);
 
   // Group winning products by supplier for the current active list (for Listas de Pedidos tab)
@@ -306,7 +393,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
       }> = [];
 
       quotesForList.forEach((q) => {
-        const resp = q.itens[p.id];
+        const resp = getProductQuoteResponse(q, p, listProducts);
         const price = Number(resp?.precoUnitario) || 0;
         if (price > 0) {
           validQuotes.push({
@@ -517,20 +604,24 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
     setTimeout(() => setIsSavedRecently(false), 2000);
   };
 
-  // Sincroniza dados da cotação com o backend e Firestore em tempo real
-  useEffect(() => {
-    if (activeSupplier && activeList) {
-      syncPortalDataToServer({
-        supplier: activeSupplier,
-        list: activeList,
-        products: listProducts,
-        quote: existingQuote || null,
-      });
-      saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier);
-      saveDocument('lists', STORAGE_KEYS.LISTS, activeList);
-      listProducts.forEach((p) => saveDocument('products', STORAGE_KEYS.PRODUCTS, p));
+  const getProductPhoto = (p?: ProductItem | null) => resolveProductImage(p, catalog, products);
+
+  const openExternalUrl = (url: string) => {
+    try {
+      const win = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!win || win.closed || typeof win.closed === 'undefined') {
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    } catch {
+      window.location.href = url;
     }
-  }, [activeSupplier?.id, activeList?.id, listProducts.length]);
+  };
 
   const supplierQuoteLink = activeSupplier
     ? generateSupplierQuoteLink(
@@ -548,15 +639,20 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   const handleCopyLink = async () => {
     if (!supplierQuoteLink || !activeSupplier || !activeList) return;
 
-    // Sincroniza ativamente com o servidor e Firestore antes de copiar
+    const hasExistingPrices = Boolean(
+      existingQuote &&
+      Object.values(existingQuote.itens || {}).some((i) => Number(i.precoUnitario) > 0)
+    );
+
+    // Sincroniza ativamente em background sem bloquear
     syncPortalDataToServer({
       supplier: activeSupplier,
       list: activeList,
       products: listProducts,
-      quote: existingQuote || null,
-    });
-    saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier);
-    saveDocument('lists', STORAGE_KEYS.LISTS, activeList);
+      quote: hasExistingPrices ? existingQuote : null,
+    }).catch(() => {});
+    saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier).catch(() => {});
+    saveDocument('lists', STORAGE_KEYS.LISTS, activeList).catch(() => {});
 
     const success = await copyTextToClipboard(supplierQuoteLink);
     if (success) {
@@ -567,41 +663,48 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
     }
   };
 
-  const handleOpenDirectLink = async () => {
+  const handleOpenDirectLink = () => {
     if (!supplierQuoteLink || !activeSupplier || !activeList) return;
 
-    // Sincroniza dados antes de abrir a aba
-    await syncPortalDataToServer({
+    const hasExistingPrices = Boolean(
+      existingQuote &&
+      Object.values(existingQuote.itens || {}).some((i) => Number(i.precoUnitario) > 0)
+    );
+
+    // Sincroniza em background sem delay assíncrono para não ser bloqueado por popup blocker
+    syncPortalDataToServer({
       supplier: activeSupplier,
       list: activeList,
       products: listProducts,
-      quote: existingQuote || null,
-    });
-    await saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier);
-    await saveDocument('lists', STORAGE_KEYS.LISTS, activeList);
+      quote: hasExistingPrices ? existingQuote : null,
+    }).catch(() => {});
+    saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier).catch(() => {});
+    saveDocument('lists', STORAGE_KEYS.LISTS, activeList).catch(() => {});
 
-    // Abre em nova aba sem bloqueio de pop-up
-    const a = document.createElement('a');
-    a.href = supplierQuoteLink;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    setCopyToast('Abrindo link da cotação em nova aba...');
+    setTimeout(() => setCopyToast(null), 2500);
+
+    // Abre imediatamente na thread do clique do usuário
+    openExternalUrl(supplierQuoteLink);
   };
 
-  const handleOpenWhatsApp = async () => {
+  const handleOpenWhatsApp = () => {
     if (!activeSupplier || !activeList) return;
 
-    // Garante que o servidor backend e Firestore possuam a cotação ativa
-    await syncPortalDataToServer({
+    const hasExistingPrices = Boolean(
+      existingQuote &&
+      Object.values(existingQuote.itens || {}).some((i) => Number(i.precoUnitario) > 0)
+    );
+
+    // Sincroniza em background
+    syncPortalDataToServer({
       supplier: activeSupplier,
       list: activeList,
       products: listProducts,
-      quote: existingQuote || null,
-    });
-    await saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier);
-    await saveDocument('lists', STORAGE_KEYS.LISTS, activeList);
+      quote: hasExistingPrices ? existingQuote : null,
+    }).catch(() => {});
+    saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, activeSupplier).catch(() => {});
+    saveDocument('lists', STORAGE_KEYS.LISTS, activeList).catch(() => {});
 
     const msg = buildWhatsAppQuoteMessage(
       activeSupplier.nome,
@@ -617,13 +720,8 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
     setCopyToast('Abrindo WhatsApp para enviar a cotação...');
     setTimeout(() => setCopyToast(null), 3000);
 
-    const a = document.createElement('a');
-    a.href = url;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    // Abre imediatamente sem await prévio para garantir sucesso em qualquer navegador
+    openExternalUrl(url);
   };
 
   return (
@@ -696,7 +794,10 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
         {/* Sub Tabs matching Screenshot 3: $ Cotar, 🏆 Disputa (3), 📑 Listas (2) */}
         <div className="flex items-center gap-2 mt-3 pt-2 border-t border-slate-800">
           <button
-            onClick={() => setSubTab('cotar')}
+            onClick={() => {
+              setSubTab('cotar');
+              onRefreshQuotes?.();
+            }}
             className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               subTab === 'cotar'
                 ? 'bg-blue-600 text-white shadow-xs'
@@ -708,7 +809,10 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
           </button>
 
           <button
-            onClick={() => setSubTab('disputa')}
+            onClick={() => {
+              setSubTab('disputa');
+              onRefreshQuotes?.();
+            }}
             className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               subTab === 'disputa'
                 ? 'bg-blue-600 text-white shadow-xs'
@@ -921,51 +1025,122 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                 </div>
 
                 {/* 4 Action Buttons: Copiar Link, Abrir Link, WhatsApp, Ver Portal */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
-                  {/* Copiar Link */}
-                  <button
-                    onClick={handleCopyLink}
-                    className="py-2.5 px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-2xs"
-                    title="Copiar link da cotação para a área de transferência"
-                  >
-                    {copiedLink ? (
-                      <Check className="w-4 h-4 text-emerald-600" />
-                    ) : (
-                      <Copy className="w-4 h-4 text-blue-600" />
-                    )}
-                    <span>{copiedLink ? 'Link Copiado!' : 'Copiar Link'}</span>
-                  </button>
+                {(() => {
+                  const whatsappUrl = activeSupplier && activeList
+                    ? buildWhatsAppQuoteUrl(
+                        activeSupplier.telefone,
+                        buildWhatsAppQuoteMessage(
+                          activeSupplier.nome,
+                          activeList.fabrica,
+                          listProducts.length,
+                          supplierQuoteLink,
+                          activeSupplier.email,
+                          activeSupplier.senha || 'forn#2026'
+                        )
+                      )
+                    : '#';
 
-                  {/* Abrir Link em Nova Aba */}
-                  <button
-                    onClick={handleOpenDirectLink}
-                    className="py-2.5 px-3 rounded-xl border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-blue-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-2xs"
-                    title="Abrir o link direto do fornecedor em uma nova aba do navegador"
-                  >
-                    <ExternalLink className="w-4 h-4 text-blue-600" />
-                    <span>Abrir Link</span>
-                  </button>
+                  return (
+                    <div className="space-y-2 pt-1">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {/* Copiar Link */}
+                        <button
+                          type="button"
+                          onClick={handleCopyLink}
+                          className="py-2.5 px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-2xs"
+                          title="Copiar link da cotação para a área de transferência"
+                        >
+                          {copiedLink ? (
+                            <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                          ) : (
+                            <Copy className="w-4 h-4 text-blue-600 shrink-0" />
+                          )}
+                          <span>{copiedLink ? 'Link Copiado!' : 'Copiar Link'}</span>
+                        </button>
 
-                  {/* WhatsApp */}
-                  <button
-                    onClick={handleOpenWhatsApp}
-                    className="py-2.5 px-3 rounded-xl bg-[#25D366] hover:bg-[#20ba59] text-white text-xs font-black flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs"
-                    title="Enviar cotação e dados de login para o WhatsApp do fornecedor"
-                  >
-                    <MessageSquare className="w-4 h-4" />
-                    <span>WhatsApp</span>
-                  </button>
+                        {/* Abrir Link em Nova Aba */}
+                        <a
+                          href={supplierQuoteLink || '#'}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => {
+                            if (!supplierQuoteLink) {
+                              e.preventDefault();
+                              return;
+                            }
+                            handleOpenDirectLink();
+                          }}
+                          className="py-2.5 px-3 rounded-xl border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-blue-800 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-2xs text-center"
+                          title="Abrir o link direto do fornecedor em uma nova aba do navegador"
+                        >
+                          <ExternalLink className="w-4 h-4 text-blue-600 shrink-0" />
+                          <span>Abrir Link</span>
+                        </a>
 
-                  {/* Ver Portal do Fornecedor */}
-                  <button
-                    onClick={() => onOpenPortalModal(activeSupplier, activeList)}
-                    className="py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-black text-white text-xs font-black flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs"
-                    title="Simular visualização do portal dentro do sistema"
-                  >
-                    <Eye className="w-4 h-4 text-emerald-400" />
-                    <span>Ver Portal</span>
-                  </button>
-                </div>
+                        {/* WhatsApp */}
+                        <a
+                          href={whatsappUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => {
+                            if (!whatsappUrl || whatsappUrl === '#') {
+                              e.preventDefault();
+                              return;
+                            }
+                            handleOpenWhatsApp();
+                          }}
+                          className="py-2.5 px-3 rounded-xl bg-[#25D366] hover:bg-[#20ba59] text-white text-xs font-black flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs text-center"
+                          title="Enviar cotação e dados de login para o WhatsApp do fornecedor"
+                        >
+                          <MessageSquare className="w-4 h-4 shrink-0" />
+                          <span>WhatsApp</span>
+                        </a>
+
+                        {/* Ver Portal do Fornecedor */}
+                        <button
+                          type="button"
+                          onClick={() => onOpenPortalModal(activeSupplier, activeList)}
+                          className="py-2.5 px-3 rounded-xl bg-slate-900 hover:bg-black text-white text-xs font-black flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs"
+                          title="Simular visualização do portal dentro do sistema"
+                        >
+                          <Eye className="w-4 h-4 text-emerald-400 shrink-0" />
+                          <span>Ver Portal</span>
+                        </button>
+                      </div>
+
+                      {/* Link oficial visível com acesso rápido */}
+                      <div className="p-2.5 rounded-2xl bg-blue-50/60 border border-blue-100 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-extrabold uppercase text-blue-900 tracking-wider">
+                            Link direto da cotação:
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleCopyLink}
+                              className="text-[11px] font-bold text-blue-700 hover:text-blue-900 underline cursor-pointer"
+                            >
+                              {copiedLink ? 'Copiado!' : 'Copiar'}
+                            </button>
+                            <span className="text-slate-300">•</span>
+                            <a
+                              href={supplierQuoteLink}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[11px] font-bold text-emerald-700 hover:text-emerald-900 underline cursor-pointer flex items-center gap-0.5"
+                            >
+                              <span>Abrir</span>
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </div>
+                        </div>
+                        <div className="p-2 bg-white rounded-xl border border-slate-200/80 font-mono text-[10px] text-slate-600 break-all select-all">
+                          {supplierQuoteLink}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Feedback Toast Notification */}
                 {copyToast && (
@@ -1018,39 +1193,44 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                       {/* Top: Product Image + Info + Subtotal */}
                       <div className="flex items-start gap-3">
                         {/* Lugar para Imagem do Produto */}
-                        <div
-                          onClick={() => {
-                            if (p.fotoUrl) {
-                              setPreviewImage({ url: p.fotoUrl, title: p.nome });
-                            }
-                          }}
-                          className={`w-14 h-14 sm:w-16 sm:h-16 rounded-xl border flex items-center justify-center shrink-0 overflow-hidden shadow-2xs relative group select-none ${
-                            p.fotoUrl
-                              ? 'border-slate-300 bg-white cursor-pointer hover:ring-2 hover:ring-blue-400'
-                              : 'border-dashed border-slate-200 bg-slate-50/80'
-                          }`}
-                          title={p.fotoUrl ? 'Clique para ampliar a foto do produto' : 'Produto sem foto anexada'}
-                        >
-                          {p.fotoUrl ? (
-                            <>
-                              <img
-                                src={p.fotoUrl}
-                                alt={p.nome}
-                                className="w-full h-full object-cover rounded-xl"
-                              />
-                              <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-xl">
-                                <Eye className="w-4 h-4 text-white drop-shadow" />
-                              </div>
-                            </>
-                          ) : (
-                            <div className="flex flex-col items-center justify-center text-slate-300 p-1 text-center">
-                              <Package className="w-5 h-5 text-slate-300 stroke-[1.6]" />
-                              <span className="text-[9px] font-semibold text-slate-400 leading-none mt-1">
-                                Foto
-                              </span>
+                        {(() => {
+                          const productPhoto = getProductPhoto(p);
+                          return (
+                            <div
+                              onClick={() => {
+                                if (productPhoto) {
+                                  setPreviewImage({ url: productPhoto, title: p.nome });
+                                }
+                              }}
+                              className={`w-14 h-14 sm:w-16 sm:h-16 rounded-xl border flex items-center justify-center shrink-0 overflow-hidden shadow-2xs relative group select-none ${
+                                productPhoto
+                                  ? 'border-slate-300 bg-white cursor-pointer hover:ring-2 hover:ring-blue-400'
+                                  : 'border-dashed border-slate-200 bg-slate-50/80'
+                              }`}
+                              title={productPhoto ? 'Clique para ampliar a foto do produto' : 'Produto sem foto anexada'}
+                            >
+                              {productPhoto ? (
+                                <>
+                                  <img
+                                    src={productPhoto}
+                                    alt={p.nome}
+                                    className="w-full h-full object-cover rounded-xl"
+                                  />
+                                  <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-xl">
+                                    <Eye className="w-4 h-4 text-white drop-shadow" />
+                                  </div>
+                                </>
+                              ) : (
+                                <div className="flex flex-col items-center justify-center text-slate-300 p-1 text-center">
+                                  <Package className="w-5 h-5 text-slate-300 stroke-[1.6]" />
+                                  <span className="text-[9px] font-semibold text-slate-400 leading-none mt-1">
+                                    Foto
+                                  </span>
+                                </div>
+                              )}
                             </div>
-                          )}
-                        </div>
+                          );
+                        })()}
 
                         {/* Product Info */}
                         <div className="min-w-0 flex-1">
@@ -1072,9 +1252,6 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                           <h4 className="text-xs sm:text-sm font-bold text-slate-900 leading-snug">
                             {p.nome}
                           </h4>
-                          <p className="text-[11px] text-slate-500 mt-0.5">
-                            Solicitado: <strong className="text-blue-700">{p.quantidade} {p.unidade}</strong>
-                          </p>
                         </div>
 
                         {/* Subtotal */}
@@ -1090,10 +1267,10 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                         )}
                       </div>
 
-                      {/* Inputs Row: Preço (com máscara à direita), Qtd (inicia com 1), Marca em uma linha única */}
+                      {/* Inputs Linha 1: Preço e Qtd */}
                       <div className="grid grid-cols-12 gap-2 pt-2 border-t border-slate-100 items-end">
                         {/* Preço com máscara e alinhamento à direita */}
-                        <div className="col-span-5 sm:col-span-5">
+                        <div className="col-span-7 sm:col-span-8">
                           <label className="text-[10.5px] font-bold text-slate-600 block mb-0.5">
                             Preço
                           </label>
@@ -1105,7 +1282,25 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                               type="text"
                               inputMode="numeric"
                               placeholder="0,00"
+                              data-nav-input={`${idx}-0`}
                               value={formatBRLInput(itemResp.precoUnitario)}
+                              onFocus={(e) => {
+                                const target = e.currentTarget;
+                                setTimeout(() => {
+                                  try {
+                                    target.select();
+                                  } catch {}
+                                }, 50);
+                              }}
+                              onClick={(e) => {
+                                const target = e.currentTarget;
+                                setTimeout(() => {
+                                  try {
+                                    target.select();
+                                  } catch {}
+                                }, 50);
+                              }}
+                              onKeyDown={(e) => handleInputKeyDown(e, idx, 0)}
                               onChange={(e) => {
                                 const val = parseBRLInput(e.target.value);
                                 handleItemFieldChange(p.id, 'precoUnitario', val);
@@ -1116,35 +1311,72 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                         </div>
 
                         {/* Qtd (sempre inicia com 1) */}
-                        <div className="col-span-3 sm:col-span-3">
+                        <div className="col-span-5 sm:col-span-4">
                           <label className="text-[10.5px] font-bold text-slate-600 block mb-0.5">
                             Qtd
                           </label>
                           <input
-                            type="number"
-                            step="any"
-                            min="1"
+                            type="text"
+                            inputMode="decimal"
                             placeholder="1"
+                            data-nav-input={`${idx}-1`}
                             value={currentQty}
+                            onFocus={(e) => {
+                              const target = e.currentTarget;
+                              setTimeout(() => {
+                                try {
+                                  target.select();
+                                  target.setSelectionRange(0, target.value.length);
+                                } catch {}
+                              }, 30);
+                            }}
+                            onClick={(e) => {
+                              const target = e.currentTarget;
+                              setTimeout(() => {
+                                try {
+                                  target.select();
+                                  target.setSelectionRange(0, target.value.length);
+                                } catch {}
+                              }, 30);
+                            }}
+                            onKeyDown={(e) => handleInputKeyDown(e, idx, 1)}
                             onChange={(e) => {
-                              const val = parseFloat(e.target.value);
-                              handleItemFieldChange(p.id, 'quantidade', isNaN(val) ? 1 : val);
+                              const raw = e.target.value;
+                              if (raw === '') {
+                                handleItemFieldChange(p.id, 'quantidade', '');
+                                return;
+                              }
+                              const clean = raw.replace(',', '.');
+                              if (/^\d*\.?\d*$/.test(clean)) {
+                                handleItemFieldChange(p.id, 'quantidade', clean);
+                              }
+                            }}
+                            onBlur={(e) => {
+                              const raw = String(e.target.value).trim().replace(',', '.');
+                              const num = parseFloat(raw);
+                              if (isNaN(num) || num <= 0) {
+                                handleItemFieldChange(p.id, 'quantidade', 1);
+                              } else {
+                                handleItemFieldChange(p.id, 'quantidade', num);
+                              }
                             }}
                             className="w-full px-2 py-1.5 rounded-xl border border-slate-300 focus:border-blue-600 text-xs font-bold text-slate-900 text-center outline-hidden bg-slate-50/50"
                           />
                         </div>
+                      </div>
 
+                      {/* Inputs Linha 2: Marca e Obs.: */}
+                      <div className="grid grid-cols-12 gap-2 pt-1.5 items-end">
                         {/* Marca */}
-                        <div className="col-span-4 sm:col-span-4">
+                        <div className="col-span-6 sm:col-span-6">
                           <label className="text-[10.5px] font-bold text-slate-600 block mb-0.5">
                             Marca
                           </label>
                           <input
                             type="text"
+                            placeholder=""
+                            data-nav-input={`${idx}-2`}
                             value={itemResp.ma || ''}
-                            onChange={(e) =>
-                              handleItemFieldChange(p.id, 'ma', e.target.value)
-                            }
                             onFocus={(e) => {
                               const target = e.currentTarget;
                               setTimeout(() => {
@@ -1161,7 +1393,44 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                                 } catch {}
                               }, 50);
                             }}
+                            onKeyDown={(e) => handleInputKeyDown(e, idx, 2)}
+                            onChange={(e) =>
+                              handleItemFieldChange(p.id, 'ma', e.target.value)
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-xl border border-slate-300 focus:border-blue-600 text-xs font-semibold text-slate-800 outline-hidden bg-slate-50/50"
+                          />
+                        </div>
+
+                        {/* Observação (Obs.:) */}
+                        <div className="col-span-6 sm:col-span-6">
+                          <label className="text-[10.5px] font-bold text-slate-600 block mb-0.5">
+                            Obs.:
+                          </label>
+                          <input
+                            type="text"
                             placeholder=""
+                            data-nav-input={`${idx}-3`}
+                            value={itemResp.observacao || ''}
+                            onFocus={(e) => {
+                              const target = e.currentTarget;
+                              setTimeout(() => {
+                                try {
+                                  target.select();
+                                } catch {}
+                              }, 50);
+                            }}
+                            onClick={(e) => {
+                              const target = e.currentTarget;
+                              setTimeout(() => {
+                                try {
+                                  target.select();
+                                } catch {}
+                              }, 50);
+                            }}
+                            onKeyDown={(e) => handleInputKeyDown(e, idx, 3)}
+                            onChange={(e) =>
+                              handleItemFieldChange(p.id, 'observacao', e.target.value)
+                            }
                             className="w-full px-2.5 py-1.5 rounded-xl border border-slate-300 focus:border-blue-600 text-xs font-semibold text-slate-800 outline-hidden bg-slate-50/50"
                           />
                         </div>
@@ -1178,11 +1447,25 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
         {subTab === 'disputa' && (
           <div className="space-y-4">
             <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 rounded-3xl border border-amber-200">
-              <div className="flex items-center gap-2 mb-1">
-                <Trophy className="w-5 h-5 text-amber-600" />
-                <h3 className="text-sm font-black text-amber-900 uppercase">
-                  Disputa de Menor Preço - Fábrica {activeList.fabrica}
-                </h3>
+              <div className="flex items-center justify-between gap-3 mb-1">
+                <div className="flex items-center gap-2">
+                  <Trophy className="w-5 h-5 text-amber-600" />
+                  <h3 className="text-sm font-black text-amber-900 uppercase">
+                    Disputa de Menor Preço - Fábrica {activeList.fabrica}
+                  </h3>
+                </div>
+                {onRefreshQuotes && (
+                  <button
+                    type="button"
+                    onClick={handleManualRefresh}
+                    disabled={isRefreshing}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-600/10 hover:bg-amber-600/20 text-amber-900 text-xs font-bold transition-all cursor-pointer border border-amber-300"
+                    title="Atualizar cotações recebidas dos fornecedores"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+                    <span>{isRefreshing ? 'Atualizando...' : 'Atualizar Cotações'}</span>
+                  </button>
+                )}
               </div>
               <p className="text-xs text-amber-800">
                 O fornecedor vencedor (menor preço ou escolhido) aparece sempre em <strong>1º lugar</strong> na lista. Você pode clicar em <strong>"Escolher"</strong> em qualquer outro fornecedor cotado para selecioná-lo para este produto.
@@ -1206,7 +1489,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                 >();
 
                 quotesForList.forEach((q) => {
-                  const resp = q.itens[p.id];
+                  const resp = getProductQuoteResponse(q, p, listProducts);
                   const price = Number(resp?.precoUnitario) || 0;
                   if (price > 0) {
                     const sup = suppliers.find((s) => s.id === q.fornecedorId);
@@ -1262,34 +1545,39 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex items-center gap-3">
                         {/* Imagem do Produto com clique para ampliar */}
-                        <div
-                          onClick={() => {
-                            if (p.fotoUrl) {
-                              setPreviewImage({ url: p.fotoUrl, title: p.nome });
-                            }
-                          }}
-                          className={`w-12 h-12 rounded-xl border flex items-center justify-center shrink-0 overflow-hidden shadow-2xs relative group select-none ${
-                            p.fotoUrl
-                              ? 'border-slate-300 bg-white cursor-pointer hover:ring-2 hover:ring-blue-400'
-                              : 'border-dashed border-slate-200 bg-slate-50/80'
-                          }`}
-                          title={p.fotoUrl ? 'Clique para ampliar foto' : 'Sem foto'}
-                        >
-                          {p.fotoUrl ? (
-                            <>
-                              <img
-                                src={p.fotoUrl}
-                                alt={p.nome}
-                                className="w-full h-full object-cover rounded-xl"
-                              />
-                              <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-xl">
-                                <Eye className="w-4 h-4 text-white drop-shadow" />
-                              </div>
-                            </>
-                          ) : (
-                            <Package className="w-5 h-5 text-slate-300 stroke-[1.6]" />
-                          )}
-                        </div>
+                        {(() => {
+                          const productPhoto = getProductPhoto(p);
+                          return (
+                            <div
+                              onClick={() => {
+                                if (productPhoto) {
+                                  setPreviewImage({ url: productPhoto, title: p.nome });
+                                }
+                              }}
+                              className={`w-12 h-12 rounded-xl border flex items-center justify-center shrink-0 overflow-hidden shadow-2xs relative group select-none ${
+                                productPhoto
+                                  ? 'border-slate-300 bg-white cursor-pointer hover:ring-2 hover:ring-blue-400'
+                                  : 'border-dashed border-slate-200 bg-slate-50/80'
+                              }`}
+                              title={productPhoto ? 'Clique para ampliar foto' : 'Sem foto'}
+                            >
+                              {productPhoto ? (
+                                <>
+                                  <img
+                                    src={productPhoto}
+                                    alt={p.nome}
+                                    className="w-full h-full object-cover rounded-xl"
+                                  />
+                                  <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-xl">
+                                    <Eye className="w-4 h-4 text-white drop-shadow" />
+                                  </div>
+                                </>
+                              ) : (
+                                <Package className="w-5 h-5 text-slate-300 stroke-[1.6]" />
+                              )}
+                            </div>
+                          );
+                        })()}
 
                         <div>
                           <h4 className="text-xs sm:text-sm font-bold text-slate-900 leading-snug">
@@ -1593,6 +1881,40 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                           <span className="w-6 h-6 rounded-full bg-slate-100 text-slate-700 flex items-center justify-center text-xs font-black shrink-0 mt-0.5">
                             {idx + 1}
                           </span>
+                          {/* Foto do Produto */}
+                          {(() => {
+                            const itemPhoto = getProductPhoto(item.product);
+                            return (
+                              <div
+                                onClick={() => {
+                                  if (itemPhoto) {
+                                    setPreviewImage({ url: itemPhoto, title: item.product.nome });
+                                  }
+                                }}
+                                className={`w-11 h-11 rounded-xl border flex items-center justify-center shrink-0 overflow-hidden shadow-2xs relative group select-none ${
+                                  itemPhoto
+                                    ? 'border-slate-300 bg-white cursor-pointer hover:ring-2 hover:ring-blue-400'
+                                    : 'border-dashed border-slate-200 bg-slate-50/80'
+                                }`}
+                                title={itemPhoto ? 'Clique para ampliar foto' : 'Sem foto'}
+                              >
+                                {itemPhoto ? (
+                                  <>
+                                    <img
+                                      src={itemPhoto}
+                                      alt={item.product.nome}
+                                      className="w-full h-full object-cover rounded-xl"
+                                    />
+                                    <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-xl">
+                                      <Eye className="w-3.5 h-3.5 text-white drop-shadow" />
+                                    </div>
+                                  </>
+                                ) : (
+                                  <Package className="w-4 h-4 text-slate-300 stroke-[1.6]" />
+                                )}
+                              </div>
+                            );
+                          })()}
                           <div className="min-w-0">
                             <h4 className="text-sm font-bold text-slate-900 leading-snug">
                               {item.product.nome}

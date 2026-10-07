@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Lock,
   Building2,
@@ -15,7 +15,7 @@ import {
   Check,
 } from 'lucide-react';
 import { Supplier, PurchaseList, ProductItem, SupplierQuote, QuoteItemResponse } from '../types';
-import { formatCurrency, formatBRLInput, parseBRLInput, PRIORITY_CONFIG } from '../utils';
+import { formatCurrency, formatBRLInput, parseBRLInput, PRIORITY_CONFIG, resolveProductImage } from '../utils';
 
 interface SupplierPortalViewProps {
   supplier: Supplier;
@@ -105,6 +105,8 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
   const [submitted, setSubmitted] = useState(false);
   const [isClosedMessage, setIsClosedMessage] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ url: string; title: string } | null>(null);
+  const [isAutoSaving, setIsAutoSaving] = useState(false);
+  const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
 
   // Supplier login handler
   const handleSupplierLogin = (e: React.FormEvent) => {
@@ -179,34 +181,130 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
     (i) => Number(i.precoUnitario) > 0
   ).length;
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const saveCurrentQuote = useCallback(
+    async (isFinalSubmit: boolean = false) => {
+      const sanitizedItems: Record<string, QuoteItemResponse> = {};
+      Object.entries(items).forEach(([pId, item]) => {
+        const parsedQty = parseFloat(String(item.quantidade).replace(',', '.'));
+        sanitizedItems[pId] = {
+          ...item,
+          precoUnitario: Number(item.precoUnitario) || 0,
+          quantidade: !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1,
+        };
+      });
 
-    const sanitizedItems: Record<string, QuoteItemResponse> = {};
-    Object.entries(items).forEach(([pId, item]) => {
-      const parsedQty = parseFloat(String(item.quantidade).replace(',', '.'));
-      sanitizedItems[pId] = {
-        ...item,
-        precoUnitario: Number(item.precoUnitario) || 0,
-        quantidade: !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1,
+      const hasAnyPrice = Object.values(sanitizedItems).some(
+        (i) => Number(i.precoUnitario) > 0
+      );
+
+      const quoteToSave: SupplierQuote = {
+        id: existingQuote?.id || `quote-${supplier.id}-${list.id}`,
+        listaId: list.id,
+        fornecedorId: supplier.id,
+        itens: sanitizedItems,
+        status: isFinalSubmit || hasAnyPrice ? 'respondido' : 'pendente',
+        preenchidoPor: 'fornecedor',
+        prazoEntrega: prazoEntrega || '24 a 48 horas',
+        condicoesPagamento: condicoesPagamento || '28 DDL',
+        frete: frete || 'CIF (Incluso no preço)',
+        observacoesGerais: observacoesGerais || '',
+        atualizadoEm: new Date().toISOString(),
       };
-    });
 
-    const quoteToSave: SupplierQuote = {
-      id: existingQuote?.id || `quote-${supplier.id}-${list.id}`,
-      listaId: list.id,
-      fornecedorId: supplier.id,
-      itens: sanitizedItems,
-      status: 'respondido',
-      preenchidoPor: 'fornecedor',
+      setIsAutoSaving(true);
+      try {
+        onSaveQuote(quoteToSave);
+        await fetch('/api/save-quote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(quoteToSave),
+        });
+
+        if (typeof BroadcastChannel !== 'undefined') {
+          const channel = new BroadcastChannel('cotacoes_live_sync');
+          channel.postMessage({ type: 'quote_updated', quote: quoteToSave });
+          channel.close();
+        }
+
+        setLastSavedTime(new Date().toLocaleTimeString('pt-BR'));
+      } catch (err) {
+        console.warn('Erro ao salvar cotação:', err);
+      } finally {
+        setIsAutoSaving(false);
+      }
+    },
+    [
+      items,
+      existingQuote?.id,
+      supplier.id,
+      list.id,
       prazoEntrega,
       condicoesPagamento,
       frete,
       observacoesGerais,
-      atualizadoEm: new Date().toISOString(),
-    };
+      onSaveQuote,
+    ]
+  );
 
-    onSaveQuote(quoteToSave);
+  // Auto-save debounced when entering values
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const hasAnyPrice = Object.values(items).some((i) => Number(i.precoUnitario) > 0);
+    if (!hasAnyPrice) return;
+
+    const timer = setTimeout(() => {
+      saveCurrentQuote(false);
+    }, 700);
+
+    return () => clearTimeout(timer);
+  }, [items, prazoEntrega, condicoesPagamento, frete, observacoesGerais, isAuthenticated, saveCurrentQuote]);
+
+  // Keyboard navigation: Enter moves to next input (Preço -> Qtd -> Marca -> Obs.: -> Próximo Card)
+  const handleInputKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+    cardIndex: number,
+    fieldIndex: number // 0: Preço, 1: Qtd, 2: Marca, 3: Obs.:
+  ) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const nextField = e.shiftKey ? fieldIndex - 1 : fieldIndex + 1;
+      let targetCard = cardIndex;
+      let targetField = nextField;
+
+      if (nextField > 3) {
+        targetCard = cardIndex + 1;
+        targetField = 0;
+      } else if (nextField < 0) {
+        targetCard = cardIndex - 1;
+        targetField = 3;
+      }
+
+      if (targetCard < 0 || targetCard >= listProducts.length) return;
+
+      const nextInput = document.querySelector<HTMLInputElement>(
+        `[data-portal-nav="${targetCard}-${targetField}"]`
+      );
+
+      if (nextInput) {
+        nextInput.focus();
+        setTimeout(() => {
+          try {
+            nextInput.select();
+            if ('setSelectionRange' in nextInput) {
+              nextInput.setSelectionRange(0, nextInput.value.length);
+            }
+          } catch {}
+        }, 20);
+        try {
+          nextInput.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } catch {}
+      }
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await saveCurrentQuote(true);
     setSubmitted(true);
   };
 
@@ -540,39 +638,44 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                     {/* Top: Product Image + Info + Subtotal */}
                     <div className="flex items-start gap-3">
                       {/* Lugar para Imagem do Produto */}
-                      <div
-                        onClick={() => {
-                          if (p.fotoUrl) {
-                            setPreviewImage({ url: p.fotoUrl, title: p.nome });
-                          }
-                        }}
-                        className={`w-14 h-14 sm:w-16 sm:h-16 rounded-xl border flex items-center justify-center shrink-0 overflow-hidden shadow-2xs relative group select-none ${
-                          p.fotoUrl
-                            ? 'border-slate-300 bg-white cursor-pointer hover:ring-2 hover:ring-blue-400'
-                            : 'border-dashed border-slate-200 bg-slate-50/80'
-                        }`}
-                        title={p.fotoUrl ? 'Clique para ampliar a foto do produto' : 'Produto sem foto anexada'}
-                      >
-                        {p.fotoUrl ? (
-                          <>
-                            <img
-                              src={p.fotoUrl}
-                              alt={p.nome}
-                              className="w-full h-full object-cover rounded-xl"
-                            />
-                            <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-xl">
-                              <Eye className="w-4 h-4 text-white drop-shadow" />
-                            </div>
-                          </>
-                        ) : (
-                          <div className="flex flex-col items-center justify-center text-slate-300 p-1 text-center">
-                            <Package className="w-5 h-5 text-slate-300 stroke-[1.6]" />
-                            <span className="text-[9px] font-semibold text-slate-400 leading-none mt-1">
-                              Foto
-                            </span>
+                      {(() => {
+                        const productPhoto = resolveProductImage(p, null, products);
+                        return (
+                          <div
+                            onClick={() => {
+                              if (productPhoto) {
+                                setPreviewImage({ url: productPhoto, title: p.nome });
+                              }
+                            }}
+                            className={`w-14 h-14 sm:w-16 sm:h-16 rounded-xl border flex items-center justify-center shrink-0 overflow-hidden shadow-2xs relative group select-none ${
+                              productPhoto
+                                ? 'border-slate-300 bg-white cursor-pointer hover:ring-2 hover:ring-blue-400'
+                                : 'border-dashed border-slate-200 bg-slate-50/80'
+                            }`}
+                            title={productPhoto ? 'Clique para ampliar a foto do produto' : 'Produto sem foto anexada'}
+                          >
+                            {productPhoto ? (
+                              <>
+                                <img
+                                  src={productPhoto}
+                                  alt={p.nome}
+                                  className="w-full h-full object-cover rounded-xl"
+                                />
+                                <div className="absolute inset-0 bg-black/35 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity rounded-xl">
+                                  <Eye className="w-4 h-4 text-white drop-shadow" />
+                                </div>
+                              </>
+                            ) : (
+                              <div className="flex flex-col items-center justify-center text-slate-300 p-1 text-center">
+                                <Package className="w-5 h-5 text-slate-300 stroke-[1.6]" />
+                                <span className="text-[9px] font-semibold text-slate-400 leading-none mt-1">
+                                  Foto
+                                </span>
+                              </div>
+                            )}
                           </div>
-                        )}
-                      </div>
+                        );
+                      })()}
 
                       {/* Product Info */}
                       <div className="min-w-0 flex-1">
@@ -620,7 +723,7 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                     {/* Inputs Row: Preço, Quantidade e Marca */}
                     <div className="grid grid-cols-12 gap-2 pt-2 border-t border-slate-100 items-end">
                       {/* Preço com máscara e alinhamento à direita */}
-                      <div className="col-span-5 sm:col-span-5">
+                      <div className="col-span-7 sm:col-span-8">
                         <label className="text-[10.5px] font-bold text-slate-600 block mb-0.5">
                           Preço Unitário (R$)
                         </label>
@@ -632,6 +735,7 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                             type="text"
                             inputMode="numeric"
                             placeholder="0,00"
+                            data-portal-nav={`${idx}-0`}
                             value={formatBRLInput(itemResp.precoUnitario)}
                             onFocus={(e) => {
                               const target = e.currentTarget;
@@ -651,6 +755,7 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                                 } catch {}
                               }, 50);
                             }}
+                            onKeyDown={(e) => handleInputKeyDown(e, idx, 0)}
                             onChange={(e) => {
                               const val = parseBRLInput(e.target.value);
                               handleFieldChange(p.id, 'precoUnitario', val);
@@ -661,7 +766,7 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                       </div>
 
                       {/* Quantidade (sempre inicia com 1, seleciona ao clicar e sobrescreve ao digitar) */}
-                      <div className="col-span-3 sm:col-span-3">
+                      <div className="col-span-5 sm:col-span-4">
                         <label className="text-[10.5px] font-bold text-slate-600 block mb-0.5">
                           Qtd
                         </label>
@@ -669,6 +774,7 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                           type="text"
                           inputMode="decimal"
                           placeholder="1"
+                          data-portal-nav={`${idx}-1`}
                           value={currentQty}
                           onFocus={(e) => {
                             const target = e.currentTarget;
@@ -688,6 +794,7 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                               } catch {}
                             }, 50);
                           }}
+                          onKeyDown={(e) => handleInputKeyDown(e, idx, 1)}
                           onChange={(e) => {
                             const raw = e.target.value;
                             if (raw === '') {
@@ -711,18 +818,20 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                           className="w-full px-2 py-1.5 rounded-xl border border-slate-300 focus:border-blue-600 text-xs font-bold text-slate-900 text-center outline-hidden bg-slate-50/50"
                         />
                       </div>
+                    </div>
 
+                    {/* Inputs Linha 2: Marca e Obs.: */}
+                    <div className="grid grid-cols-12 gap-2 pt-1.5 items-end">
                       {/* Marca Ofertada */}
-                      <div className="col-span-4 sm:col-span-4">
+                      <div className="col-span-6 sm:col-span-6">
                         <label className="text-[10.5px] font-bold text-slate-600 block mb-0.5">
                           Marca
                         </label>
                         <input
                           type="text"
+                          placeholder=""
+                          data-portal-nav={`${idx}-2`}
                           value={itemResp.ma || ''}
-                          onChange={(e) =>
-                            handleFieldChange(p.id, 'ma', e.target.value)
-                          }
                           onFocus={(e) => {
                             const target = e.currentTarget;
                             setTimeout(() => {
@@ -739,7 +848,44 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                               } catch {}
                             }, 50);
                           }}
+                          onKeyDown={(e) => handleInputKeyDown(e, idx, 2)}
+                          onChange={(e) =>
+                            handleFieldChange(p.id, 'ma', e.target.value)
+                          }
+                          className="w-full px-2.5 py-1.5 rounded-xl border border-slate-300 focus:border-blue-600 text-xs font-semibold text-slate-800 outline-hidden bg-slate-50/50"
+                        />
+                      </div>
+
+                      {/* Observação (Obs.:) */}
+                      <div className="col-span-6 sm:col-span-6">
+                        <label className="text-[10.5px] font-bold text-slate-600 block mb-0.5">
+                          Obs.:
+                        </label>
+                        <input
+                          type="text"
                           placeholder=""
+                          data-portal-nav={`${idx}-3`}
+                          value={itemResp.observacao || ''}
+                          onFocus={(e) => {
+                            const target = e.currentTarget;
+                            setTimeout(() => {
+                              try {
+                                target.select();
+                              } catch {}
+                            }, 50);
+                          }}
+                          onClick={(e) => {
+                            const target = e.currentTarget;
+                            setTimeout(() => {
+                              try {
+                                target.select();
+                              } catch {}
+                            }, 50);
+                          }}
+                          onKeyDown={(e) => handleInputKeyDown(e, idx, 3)}
+                          onChange={(e) =>
+                            handleFieldChange(p.id, 'observacao', e.target.value)
+                          }
                           className="w-full px-2.5 py-1.5 rounded-xl border border-slate-300 focus:border-blue-600 text-xs font-semibold text-slate-800 outline-hidden bg-slate-50/50"
                         />
                       </div>
@@ -762,7 +908,6 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                   </label>
                   <input
                     type="text"
-                    required
                     value={prazoEntrega}
                     onChange={(e) => setPrazoEntrega(e.target.value)}
                     placeholder="Ex: Pronta entrega, 2 dias"
@@ -776,7 +921,6 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
                   </label>
                   <input
                     type="text"
-                    required
                     value={condicoesPagamento}
                     onChange={(e) => setCondicoesPagamento(e.target.value)}
                     placeholder="Ex: 28 DDL, Boleto 30 dias"

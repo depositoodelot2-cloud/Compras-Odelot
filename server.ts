@@ -58,6 +58,40 @@ function persistDb() {
   }
 }
 
+function mergeQuoteItems(existingItens: any = {}, incomingItens: any = {}) {
+  const merged: any = { ...existingItens };
+  for (const [key, val] of Object.entries(incomingItens || {})) {
+    const existing = merged[key];
+    const incomingVal = val as any;
+    if (!existing) {
+      merged[key] = incomingVal;
+    } else {
+      const incomingPrice = Number(incomingVal?.precoUnitario) || 0;
+      const existingPrice = Number(existing?.precoUnitario) || 0;
+      // Preserve existing valid price if incoming is 0
+      const finalPrice = incomingPrice > 0 ? incomingPrice : existingPrice;
+      const finalQty =
+        Number(incomingVal?.quantidade) > 0
+          ? incomingVal.quantidade
+          : Number(existing?.quantidade) > 0
+          ? existing.quantidade
+          : 1;
+      const finalMa = (incomingVal?.ma || '').trim() || (existing?.ma || '').trim() || '';
+      const finalObs = (incomingVal?.observacao || '').trim() || (existing?.observacao || '').trim() || '';
+
+      merged[key] = {
+        ...existing,
+        ...incomingVal,
+        precoUnitario: finalPrice,
+        quantidade: finalQty,
+        ma: finalMa,
+        observacao: finalObs,
+      };
+    }
+  }
+  return merged;
+}
+
 app.use(express.json({ limit: '10mb' }));
 
 // API Endpoints
@@ -155,18 +189,46 @@ app.post('/api/sync-portal-data', (req: Request, res: Response) => {
   if (products && Array.isArray(products)) {
     products.forEach((p: any) => {
       const idx = dbState.products.findIndex((prod: any) => prod.id === p.id);
-      if (idx >= 0) dbState.products[idx] = { ...dbState.products[idx], ...p };
-      else dbState.products.push(p);
+      if (idx >= 0) {
+        const existingFoto = dbState.products[idx].fotoUrl;
+        const newFoto = p.fotoUrl || existingFoto;
+        dbState.products[idx] = { ...dbState.products[idx], ...p, fotoUrl: newFoto };
+      } else {
+        let resolvedFoto = p.fotoUrl;
+        if (!resolvedFoto) {
+          const match = dbState.products.find(
+            (dp: any) => dp.fotoUrl && dp.nome?.trim().toLowerCase() === p.nome?.trim().toLowerCase()
+          );
+          if (match?.fotoUrl) resolvedFoto = match.fotoUrl;
+        }
+        dbState.products.push({ ...p, fotoUrl: resolvedFoto });
+      }
     });
   }
   if (quote && quote.listaId && quote.fornecedorId) {
     const idx = dbState.quotes.findIndex(
       (q: any) =>
-        (q.listaId === quote.listaId || q.listaId?.toLowerCase() === quote.listaId?.toLowerCase()) &&
-        (q.fornecedorId === quote.fornecedorId || q.fornecedorId?.toLowerCase() === quote.fornecedorId?.toLowerCase())
+        q.id === quote.id ||
+        ((q.listaId === quote.listaId || q.listaId?.toLowerCase() === quote.listaId?.toLowerCase()) &&
+         (q.fornecedorId === quote.fornecedorId || q.fornecedorId?.toLowerCase() === quote.fornecedorId?.toLowerCase()))
     );
-    if (idx >= 0) dbState.quotes[idx] = { ...dbState.quotes[idx], ...quote };
-    else dbState.quotes.unshift(quote);
+    if (idx >= 0) {
+      const existing = dbState.quotes[idx];
+      const mergedItens = mergeQuoteItems(existing.itens, quote.itens);
+      const hasAnyPrice = Object.values(mergedItens).some((i: any) => Number(i.precoUnitario) > 0);
+      const isSupplierFilled = quote.preenchidoPor === 'fornecedor' || existing.preenchidoPor === 'fornecedor';
+      dbState.quotes[idx] = {
+        ...existing,
+        ...quote,
+        id: existing.id || quote.id,
+        itens: mergedItens,
+        status: hasAnyPrice ? 'respondido' : (quote.status || existing.status || 'pendente'),
+        preenchidoPor: isSupplierFilled ? 'fornecedor' : (quote.preenchidoPor || existing.preenchidoPor || 'empresa'),
+        atualizadoEm: quote.atualizadoEm || new Date().toISOString(),
+      };
+    } else {
+      dbState.quotes.unshift(quote);
+    }
   }
   persistDb();
   res.json({
@@ -208,9 +270,19 @@ app.get('/api/portal-quote', (req: Request, res: Response) => {
   const list = dbState.lists.find(
     (l: any) => l.id === listId || l.id?.toLowerCase() === listId.toLowerCase()
   );
-  const products = dbState.products.filter(
-    (p: any) => p.listaId === listId || p.listaId?.toLowerCase() === listId.toLowerCase()
-  );
+  const products = dbState.products
+    .filter(
+      (p: any) => p.listaId === listId || p.listaId?.toLowerCase() === listId.toLowerCase()
+    )
+    .map((p: any) => {
+      if (!p.fotoUrl) {
+        const match = dbState.products.find(
+          (dp: any) => dp.fotoUrl && dp.nome?.trim().toLowerCase() === p.nome?.trim().toLowerCase()
+        );
+        if (match?.fotoUrl) return { ...p, fotoUrl: match.fotoUrl };
+      }
+      return p;
+    });
   const quote = dbState.quotes.find(
     (q: any) =>
       (q.listaId === listId || q.listaId?.toLowerCase() === listId.toLowerCase()) &&
@@ -243,15 +315,32 @@ app.post('/api/save-quote', (req: Request, res: Response) => {
   }
 
   const quotes = dbState.quotes;
-  const idx = quotes.findIndex((q: any) => q.id === quote.id);
+  const idx = quotes.findIndex(
+    (q: any) =>
+      q.id === quote.id ||
+      ((q.listaId === quote.listaId || q.listaId?.toLowerCase() === quote.listaId?.toLowerCase()) &&
+       (q.fornecedorId === quote.fornecedorId || q.fornecedorId?.toLowerCase() === quote.fornecedorId?.toLowerCase()))
+  );
   if (idx >= 0) {
-    quotes[idx] = quote;
+    const existing = quotes[idx];
+    const mergedItens = mergeQuoteItems(existing.itens, quote.itens);
+    const hasAnyPrice = Object.values(mergedItens).some((i: any) => Number(i.precoUnitario) > 0);
+    const isSupplierFilled = quote.preenchidoPor === 'fornecedor' || existing.preenchidoPor === 'fornecedor';
+    quotes[idx] = {
+      ...existing,
+      ...quote,
+      id: existing.id || quote.id,
+      itens: mergedItens,
+      status: hasAnyPrice ? 'respondido' : (quote.status || existing.status || 'pendente'),
+      preenchidoPor: isSupplierFilled ? 'fornecedor' : (quote.preenchidoPor || existing.preenchidoPor || 'empresa'),
+      atualizadoEm: quote.atualizadoEm || new Date().toISOString(),
+    };
   } else {
     quotes.unshift(quote);
   }
 
   persistDb();
-  res.json({ success: true, quote });
+  res.json({ success: true, quote: idx >= 0 ? quotes[idx] : quote });
 });
 
 // Vite or Static files handler

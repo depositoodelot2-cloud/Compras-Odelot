@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   getFirestore,
+  initializeFirestore,
   collection,
   doc,
   setDoc,
@@ -103,14 +104,20 @@ export async function logoutFirebase(): Promise<void> {
 export { onAuthStateChanged };
 export type { FirebaseUser };
 
-// Firestore Database Instance - Conecta ao banco provisionado no projeto
+// Firestore Database Instance - Conecta ao banco provisionado no projeto com long-polling estável
 const rawDatabaseId = (firebaseConfig as any).firestoreDatabaseId;
 export const firestoreDbId =
   rawDatabaseId && rawDatabaseId !== '(default)'
     ? rawDatabaseId
     : undefined;
 
-export const db = firestoreDbId ? getFirestore(app, firestoreDbId) : getFirestore(app);
+export const db = initializeFirestore(
+  app,
+  {
+    experimentalForceLongPolling: true,
+  },
+  firestoreDbId
+);
 
 // Enable persistence if possible
 try {
@@ -128,7 +135,7 @@ async function testConnection() {
     console.info(`Conexão com Firebase Firestore [${firestoreDbId || 'default'}] estabelecida com sucesso!`);
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firebase client offline, utilizing local reactive fallback.');
+      console.warn("Please check your Firebase configuration.");
     }
   }
 }
@@ -374,8 +381,10 @@ export async function saveDocument<T extends { id: string }>(
   }
   setLocal(storageKey, updatedList);
 
-  // Dispara evento para reatividade na mesma janela
-  window.dispatchEvent(new CustomEvent(`sync_${storageKey}`, { detail: updatedList }));
+  // Dispara evento para reatividade na mesma janela fora do ciclo síncrono de render
+  setTimeout(() => {
+    window.dispatchEvent(new CustomEvent(`sync_${storageKey}`, { detail: updatedList }));
+  }, 0);
 
   // 2. Persiste no Firestore em tempo real
   try {
@@ -409,8 +418,10 @@ export async function removeDocument<T extends { id: string }>(
   const updatedList = currentList.filter((i) => i.id !== id);
   setLocal(storageKey, updatedList);
 
-  // Dispara evento para reatividade na mesma janela
-  window.dispatchEvent(new CustomEvent(`sync_${storageKey}`, { detail: updatedList }));
+  // Dispara evento para reatividade na mesma janela fora do ciclo síncrono de render
+  setTimeout(() => {
+    window.dispatchEvent(new CustomEvent(`sync_${storageKey}`, { detail: updatedList }));
+  }, 0);
 
   // 2. Remove no Firestore
   try {
