@@ -53,7 +53,7 @@ export const UserSwitchModal: React.FC<UserSwitchModalProps> = ({
             </div>
           ) : (
             users.map((u) => {
-              const isSelected = u.id === currentUser.id;
+              const isSelected = u.id === currentUser?.id;
 
             return (
               <div

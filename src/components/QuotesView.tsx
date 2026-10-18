@@ -24,6 +24,8 @@ import {
   ExternalLink,
   Check,
   RefreshCw,
+  RotateCcw,
+  Loader2,
 } from 'lucide-react';
 import {
   PurchaseList,
@@ -48,7 +50,7 @@ import {
   getProductQuoteResponse,
   mergeQuoteItems,
 } from '../utils';
-import { saveDocument, STORAGE_KEYS } from '../firebase';
+import { saveDocument, STORAGE_KEYS, getLocal, setLocal } from '../firebase';
 
 interface QuotesViewProps {
   lists: PurchaseList[];
@@ -66,8 +68,15 @@ interface QuotesViewProps {
   onOpenPrintModal: (quote: SupplierQuote, supplier: Supplier, list: PurchaseList) => void;
   onOpenNewSupplier: () => void;
   onEditSupplier?: (supplier: Supplier) => void;
-  onSelectWinner?: (productId: string, supplierId: string) => void;
+  onSelectWinner?: (
+    productId: string,
+    supplierId: string,
+    price?: number,
+    supplierName?: string
+  ) => Promise<boolean> | boolean | void;
+  onUndoWinnerChoice?: (productId: string) => Promise<boolean> | boolean | void;
   onRefreshQuotes?: () => Promise<void> | void;
+  onUpdateProductOrderQty?: (productId: string, quantity: number) => Promise<void> | void;
 }
 
 type SubTab = 'cotar' | 'disputa' | 'listas';
@@ -100,9 +109,54 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   onOpenNewSupplier,
   onEditSupplier,
   onSelectWinner,
+  onUndoWinnerChoice,
   onRefreshQuotes,
+  onUpdateProductOrderQty,
 }) => {
-  const [subTab, setSubTab] = useState<SubTab>('cotar');
+  const [subTab, setSubTab] = useState<SubTab>(() => {
+    if (typeof window !== 'undefined') {
+      const hash = window.location.hash.toLowerCase();
+      if (hash.includes('disputa')) return 'disputa';
+      if (hash.includes('listas') || hash.includes('pedidos')) return 'listas';
+      if (hash.includes('cotar')) return 'cotar';
+      const saved = getLocal<string>(STORAGE_KEYS.QUOTES_SUBTAB, '');
+      if (saved === 'disputa' || saved === 'cotar' || saved === 'listas') {
+        return saved as SubTab;
+      }
+    }
+    return 'cotar';
+  });
+
+  const handleSelectSubTab = (newSubTab: SubTab) => {
+    setSubTab(newSubTab);
+    setLocal(STORAGE_KEYS.QUOTES_SUBTAB, newSubTab);
+    try {
+      sessionStorage.setItem('app_session_current_tab', 'cotacoes');
+    } catch {}
+    if (typeof window !== 'undefined') {
+      window.location.hash = `#cotacoes/${newSubTab}`;
+    }
+  };
+
+  // Sincroniza subTab com alterações no hash da URL
+  useEffect(() => {
+    const handleHash = () => {
+      const hash = window.location.hash.toLowerCase();
+      if (hash.includes('disputa')) {
+        setSubTab('disputa');
+        setLocal(STORAGE_KEYS.QUOTES_SUBTAB, 'disputa');
+      } else if (hash.includes('listas') || hash.includes('pedidos')) {
+        setSubTab('listas');
+        setLocal(STORAGE_KEYS.QUOTES_SUBTAB, 'listas');
+      } else if (hash.includes('cotar')) {
+        setSubTab('cotar');
+        setLocal(STORAGE_KEYS.QUOTES_SUBTAB, 'cotar');
+      }
+    };
+    window.addEventListener('hashchange', handleHash);
+    return () => window.removeEventListener('hashchange', handleHash);
+  }, []);
+
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedEmail, setCopiedEmail] = useState(false);
   const [copiedSenha, setCopiedSenha] = useState(false);
@@ -120,6 +174,17 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
       setTimeout(() => setIsRefreshing(false), 600);
     }
   };
+
+  // Rotina de atualização automática segura a cada 5 minutos (300.000 ms)
+  // Preserva integralmente as escolhas manuais e a estabilidade da tela
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        onRefreshQuotes?.();
+      }
+    }, 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, [onRefreshQuotes]);
 
   const activeList = lists.find((l) => l.id === activeListId) || lists[0] || DEFAULT_EMPTY_LIST;
   const listProducts = useMemo(
@@ -190,10 +255,153 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   const [isSavedRecently, setIsSavedRecently] = useState(false);
   const [previewImage, setPreviewImage] = useState<{ url: string; title: string } | null>(null);
 
-  // Subtab 'listas' (Pedidos por Fornecedor) state
-  const [orderQuantities, setOrderQuantities] = useState<Record<string, number>>({});
+  // Subtab 'listas' (Pedidos por Fornecedor) state com persistência em LocalStorage e Firestore
+  const [orderQuantities, setOrderQuantities] = useState<Record<string, number>>(() => {
+    if (typeof window !== 'undefined' && activeListId) {
+      return getLocal<Record<string, number>>(`app_compras_order_qty_${activeListId}`, {});
+    }
+    return {};
+  });
   const [selectedOrderSupplierId, setSelectedOrderSupplierId] = useState<string>('');
   const [copiedOrderText, setCopiedOrderText] = useState(false);
+
+  // Re-sincroniza orderQuantities ao mudar de lista ou quando os produtos carregam do Firestore
+  useEffect(() => {
+    if (!activeList?.id) return;
+    const storageKey = `app_compras_order_qty_${activeList.id}`;
+    const localSaved = getLocal<Record<string, number>>(storageKey, {});
+    const fromProducts: Record<string, number> = {};
+    listProducts.forEach((p) => {
+      if (p.quantidadePedido !== undefined) {
+        fromProducts[p.id] = p.quantidadePedido;
+      }
+    });
+    setOrderQuantities((prev) => ({
+      ...fromProducts,
+      ...localSaved,
+      ...prev,
+    }));
+  }, [activeList?.id, listProducts]);
+
+  // Feedback visual e controle de estado para escolha de fornecedor na Disputa
+  const [winnerSavingMap, setWinnerSavingMap] = useState<
+    Record<
+      string,
+      {
+        status: 'idle' | 'saving' | 'saved' | 'error';
+        targetSupplierId?: string;
+        message?: string;
+      }
+    >
+  >({});
+
+  const handleChooseWinner = async (
+    productId: string,
+    supplierId: string,
+    price: number,
+    supplierName: string
+  ) => {
+    // 1. Marca imediatamente como "Salvando..."
+    setWinnerSavingMap((prev) => ({
+      ...prev,
+      [productId]: { status: 'saving', targetSupplierId: supplierId, message: 'Salvando...' },
+    }));
+
+    try {
+      const result = await onSelectWinner?.(productId, supplierId, price, supplierName);
+      if (result !== false) {
+        setWinnerSavingMap((prev) => ({
+          ...prev,
+          [productId]: {
+            status: 'saved',
+            targetSupplierId: supplierId,
+            message: 'Escolha salva',
+          },
+        }));
+        setTimeout(() => {
+          setWinnerSavingMap((prev) => {
+            if (prev[productId]?.status === 'saved') {
+              const copy = { ...prev };
+              delete copy[productId];
+              return copy;
+            }
+            return prev;
+          });
+        }, 2500);
+      } else {
+        throw new Error('Falha ao gravar no banco');
+      }
+    } catch (err: any) {
+      setWinnerSavingMap((prev) => ({
+        ...prev,
+        [productId]: {
+          status: 'error',
+          targetSupplierId: supplierId,
+          message: 'Erro ao salvar. Escolha revertida.',
+        },
+      }));
+      setTimeout(() => {
+        setWinnerSavingMap((prev) => {
+          if (prev[productId]?.status === 'error') {
+            const copy = { ...prev };
+            delete copy[productId];
+            return copy;
+          }
+          return prev;
+        });
+      }, 4000);
+    }
+  };
+
+  const handleUndoWinner = async (productId: string) => {
+    setWinnerSavingMap((prev) => ({
+      ...prev,
+      [productId]: { status: 'saving', message: 'Removendo...' },
+    }));
+
+    try {
+      const result = await onUndoWinnerChoice?.(productId);
+      if (result !== false) {
+        setWinnerSavingMap((prev) => ({
+          ...prev,
+          [productId]: {
+            status: 'saved',
+            message: 'Voltou ao menor preço',
+          },
+        }));
+        setTimeout(() => {
+          setWinnerSavingMap((prev) => {
+            if (prev[productId]?.status === 'saved') {
+              const copy = { ...prev };
+              delete copy[productId];
+              return copy;
+            }
+            return prev;
+          });
+        }, 2500);
+      } else {
+        throw new Error('Falha ao remover escolha manual');
+      }
+    } catch (err) {
+      setWinnerSavingMap((prev) => ({
+        ...prev,
+        [productId]: {
+          status: 'error',
+          message: 'Erro ao desfazer escolha.',
+        },
+      }));
+      setTimeout(() => {
+        setWinnerSavingMap((prev) => {
+          if (prev[productId]?.status === 'error') {
+            const copy = { ...prev };
+            delete copy[productId];
+            return copy;
+          }
+          return prev;
+        });
+      }, 4000);
+    }
+  };
 
   // Sync state when supplier or quote changes
   React.useEffect(() => {
@@ -415,7 +623,9 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
       const lowestQuote = validQuotes.find((v) => v.price === minPrice);
 
       // Check if user manually selected a winner for this product
-      const manualWinnerId = p.fornecedorEscolhidoId;
+      const manualWinnersMap = getLocal<Record<string, any>>(STORAGE_KEYS.MANUAL_WINNERS, {});
+      const localManual = manualWinnersMap[p.id];
+      const manualWinnerId = p.fornecedorEscolhidoId || (localManual?.isManualSelection ? localManual.supplierId : undefined);
       const manualQuote = manualWinnerId
         ? validQuotes.find((v) => v.supplierId === manualWinnerId)
         : null;
@@ -432,7 +642,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
           price: winningItem.price,
           ma: winningItem.ma,
           supplierQty: winningItem.supplierQty,
-          isManualChoice: !!manualQuote && manualWinnerId !== lowestQuote?.supplierId,
+          isManualChoice: !!manualQuote && Boolean(p.isManualSelection || localManual?.isManualSelection || manualWinnerId !== lowestQuote?.supplierId),
           isLowestPrice: winningItem.price === minPrice,
           quote: winningItem.quote,
         });
@@ -476,18 +686,31 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   const handleUpdateOrderQty = (productId: string, delta: number) => {
     setOrderQuantities((prev) => {
       const wonItem = wonItemsForActiveSupplier.find((item) => item.product.id === productId);
-      const defaultQty = wonItem ? wonItem.supplierQty : 1;
+      const defaultQty =
+        wonItem?.product.quantidadePedido !== undefined
+          ? wonItem.product.quantidadePedido
+          : (wonItem ? wonItem.supplierQty : 1);
       const current = prev[productId] !== undefined ? prev[productId] : defaultQty;
       const next = Math.max(0, current + delta);
-      return { ...prev, [productId]: next };
+      const updated = { ...prev, [productId]: next };
+      if (activeList?.id) {
+        setLocal(`app_compras_order_qty_${activeList.id}`, updated);
+      }
+      onUpdateProductOrderQty?.(productId, next);
+      return updated;
     });
   };
 
   const handleSetOrderQty = (productId: string, val: number) => {
-    setOrderQuantities((prev) => ({
-      ...prev,
-      [productId]: Math.max(0, val),
-    }));
+    const next = Math.max(0, val);
+    setOrderQuantities((prev) => {
+      const updated = { ...prev, [productId]: next };
+      if (activeList?.id) {
+        setLocal(`app_compras_order_qty_${activeList.id}`, updated);
+      }
+      onUpdateProductOrderQty?.(productId, next);
+      return updated;
+    });
   };
 
   const handleSendOrderWhatsApp = () => {
@@ -725,9 +948,9 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-24 w-full min-w-0 overflow-x-hidden">
-      {/* Top Header matching Screenshot 3 */}
-      <div className="bg-[#0f172a] text-white px-4 py-3 sticky top-0 z-30 shadow-md">
+    <div className="flex-1 flex flex-col min-h-0 w-full h-full bg-slate-50 overflow-hidden relative">
+      {/* Top Header matching Screenshot 3 - FIXO NO TOPO */}
+      <div className="shrink-0 z-30 bg-[#0f172a] text-white px-4 py-3 shadow-md w-full min-w-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <button
@@ -742,62 +965,19 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
             </div>
             <div>
               <h1 className="text-base font-black tracking-tight text-white flex items-center gap-1.5">
-                <span>Área de Cotações</span>
+                <span>Cotações</span>
               </h1>
               <p className="text-[10px] text-slate-400">Lançamento e envio para fornecedores</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            {/* PDF Button matching Screenshot 3 */}
-            <button
-              onClick={() => {
-                if (existingQuote && activeSupplier) {
-                  onOpenPrintModal(existingQuote, activeSupplier, activeList);
-                } else {
-                  handleSaveCurrentQuote();
-                  if (activeSupplier) {
-                    onOpenPrintModal(
-                      {
-                        id: 'temp',
-                        listaId: activeList.id,
-                        fornecedorId: activeSupplier.id,
-                        itens: quoteItems,
-                        status: 'respondido',
-                        prazoEntrega,
-                        condicoesPagamento,
-                        frete,
-                      },
-                      activeSupplier,
-                      activeList
-                    );
-                  }
-                }
-              }}
-              className="px-3 py-1.5 rounded-xl border border-amber-500/60 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-            >
-              <FileText className="w-3.5 h-3.5" />
-              <span>PDF</span>
-            </button>
-
-            {/* Fornecedores button matching Screenshot 3 */}
-            <button
-              onClick={onOpenNewSupplier}
-              className="px-3 py-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-            >
-              <Building2 className="w-3.5 h-3.5 text-blue-400" />
-              <span>Fornecedores</span>
-            </button>
-          </div>
+          {/* Top header buttons removed per user request */}
         </div>
 
         {/* Sub Tabs matching Screenshot 3: $ Cotar, 🏆 Disputa (3), 📑 Listas (2) */}
         <div className="flex items-center gap-2 mt-3 pt-2 border-t border-slate-800">
           <button
-            onClick={() => {
-              setSubTab('cotar');
-              onRefreshQuotes?.();
-            }}
+            onClick={() => handleSelectSubTab('cotar')}
             className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               subTab === 'cotar'
                 ? 'bg-blue-600 text-white shadow-xs'
@@ -809,10 +989,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
           </button>
 
           <button
-            onClick={() => {
-              setSubTab('disputa');
-              onRefreshQuotes?.();
-            }}
+            onClick={() => handleSelectSubTab('disputa')}
             className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               subTab === 'disputa'
                 ? 'bg-blue-600 text-white shadow-xs'
@@ -827,7 +1004,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
           </button>
 
           <button
-            onClick={() => setSubTab('listas')}
+            onClick={() => handleSelectSubTab('listas')}
             className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               subTab === 'listas'
                 ? 'bg-blue-600 text-white shadow-xs'
@@ -835,7 +1012,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
             }`}
           >
             <FileText className="w-3.5 h-3.5 text-blue-300" />
-            <span>Listas...</span>
+            <span>Pedidos</span>
             <span className="px-1.5 py-0.2 rounded-full text-[10px] font-black bg-blue-500 text-white">
               {listProducts.length}
             </span>
@@ -843,8 +1020,8 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
         </div>
       </div>
 
-      {/* Main Content Area */}
-      <div className="p-4 space-y-4 max-w-3xl mx-auto">
+      {/* Main Content Area - ROLAGEM SUAVE COM CABEÇALHO FIXO */}
+      <div className="flex-1 overflow-y-auto overscroll-contain p-4 space-y-4 max-w-3xl w-full mx-auto pb-28">
         {/* SUBTAB 1: COTAR */}
         {subTab === 'cotar' && (
           <>
@@ -1513,15 +1690,31 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                 const lowestPriceRow = quotedRows.find((r) => r.price === lowestPrice);
 
                 // Determine winner: user manual choice if set and valid, else lowest price
-                const manualChosenId = p.fornecedorEscolhidoId;
-                const hasManualChosen =
-                  manualChosenId &&
-                  quotedRows.some((r) => r.supplierId === manualChosenId);
-                const winnerSupplierId = hasManualChosen
-                  ? manualChosenId
-                  : lowestPriceRow?.supplierId;
-                const isCustomChoice =
-                  hasManualChosen && manualChosenId !== lowestPriceRow?.supplierId;
+                const manualWinnersMap = getLocal<Record<string, any>>(STORAGE_KEYS.MANUAL_WINNERS, {});
+                const localManual = manualWinnersMap[p.id];
+                const manualChosenId = p.fornecedorEscolhidoId || (localManual?.isManualSelection ? localManual.supplierId : undefined);
+                const manualChosenRow = manualChosenId
+                  ? quotedRows.find((r) => r.supplierId === manualChosenId)
+                  : null;
+
+                // Caso especial (Requisito 6): Fornecedor escolhido manualmente deixou de ter cotação válida
+                const hasManualConfig = Boolean(
+                  (manualChosenId && (p.isManualSelection || localManual?.isManualSelection))
+                );
+                const manualSupplierLostQuote = Boolean(hasManualConfig && !manualChosenRow);
+
+                let winnerSupplierId: string | undefined;
+                let isCustomChoice = false;
+
+                if (manualChosenRow) {
+                  // Prioridade 1: Escolha manual com cotação válida tem precedência absoluta sobre menor preço
+                  winnerSupplierId = manualChosenId;
+                  isCustomChoice = true;
+                } else {
+                  // Prioridade 2: Regra de menor preço automático
+                  winnerSupplierId = lowestPriceRow?.supplierId;
+                  isCustomChoice = false;
+                }
 
                 // Sort: winner in 1st place, followed by remaining ordered by price ascending
                 const sortedQuotedRows = [...quotedRows].sort((a, b) => {
@@ -1539,7 +1732,11 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                 return (
                   <div
                     key={p.id}
-                    className="p-3.5 sm:p-4 bg-white rounded-2xl border border-slate-200 shadow-2xs space-y-3"
+                    className={`p-3.5 sm:p-4 bg-white rounded-2xl border shadow-2xs space-y-3 transition-all ${
+                      isCustomChoice
+                        ? 'border-emerald-300 ring-1 ring-emerald-400/20'
+                        : 'border-slate-200'
+                    }`}
                   >
                     {/* Header do Produto */}
                     <div className="flex items-start justify-between gap-3">
@@ -1599,9 +1796,76 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                             <Trophy className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                             {winnerRow.supplierName}: {formatCurrency(winnerRow.price)}
                           </span>
+                          {/* Opção Desfazer Escolha Manual (Requisito 5) */}
+                          {isCustomChoice && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleUndoWinner(p.id);
+                              }}
+                              className="mt-1 px-2 py-0.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 text-[10px] font-bold flex items-center gap-1 ml-auto transition-colors cursor-pointer shadow-2xs"
+                              title="Remover escolha manual e voltar ao menor preço automático"
+                            >
+                              <RotateCcw className="w-2.5 h-2.5 text-slate-400" />
+                              <span>Voltar ao menor preço</span>
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
+
+                    {/* Alerta de Caso Especial (Requisito 6): Fornecedor escolhido manualmente perdeu a cotação válida */}
+                    {manualSupplierLostQuote && (
+                      <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 flex items-start justify-between gap-3 animate-in fade-in">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                          <div className="text-xs">
+                            <strong className="block font-bold">Cotação do Escolhido Indisponível:</strong>
+                            <p className="text-[11px] text-amber-800 mt-0.5 leading-snug">
+                              O fornecedor anteriormente escolhido ({p.fornecedorEscolhidoNome || localManual?.supplierName || 'selecionado'}) não possui cotação com valor ativo para este produto. O sistema voltou temporariamente para o critério de menor preço.
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleUndoWinner(p.id)}
+                          className="px-2.5 py-1 rounded-xl bg-amber-200 hover:bg-amber-300 text-amber-950 font-bold text-[11px] shrink-0 transition-colors cursor-pointer"
+                        >
+                          Limpar Escolha
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Feedback Visual de Salvamento / Sucesso / Erro (Requisito 4) */}
+                    {winnerSavingMap[p.id] && (
+                      <div
+                        className={`p-2.5 rounded-xl text-xs font-bold flex items-center justify-between gap-2 animate-in fade-in duration-150 ${
+                          winnerSavingMap[p.id].status === 'saving'
+                            ? 'bg-blue-50 text-blue-800 border border-blue-200'
+                            : winnerSavingMap[p.id].status === 'saved'
+                            ? 'bg-emerald-50 text-emerald-800 border border-emerald-300'
+                            : 'bg-rose-50 text-rose-800 border border-rose-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          {winnerSavingMap[p.id].status === 'saving' && (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600 shrink-0" />
+                          )}
+                          {winnerSavingMap[p.id].status === 'saved' && (
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                          )}
+                          {winnerSavingMap[p.id].status === 'error' && (
+                            <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                          )}
+                          <span>
+                            {winnerSavingMap[p.id].status === 'saving'
+                              ? 'Salvando escolha no banco de dados...'
+                              : winnerSavingMap[p.id].message || 'Escolha salva'}
+                          </span>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Compare only suppliers who quoted, winner 1st, allow selecting any */}
                     <div className="pt-2 border-t border-slate-100 space-y-2">
@@ -1616,17 +1880,11 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                           return (
                             <div
                               key={r.supplierId}
-                              onClick={() => onSelectWinner?.(p.id, r.supplierId)}
-                              className={`p-2.5 sm:p-3 rounded-xl border flex items-center justify-between gap-2.5 transition-all cursor-pointer ${
+                              className={`p-2.5 sm:p-3 rounded-xl border flex items-center justify-between gap-2.5 transition-all ${
                                 isWinner
                                   ? 'bg-emerald-50/95 border-emerald-400 ring-2 ring-emerald-500/25 shadow-xs'
                                   : 'bg-slate-50/80 hover:bg-blue-50/70 border-slate-200 hover:border-blue-300 text-slate-700'
                               }`}
-                              title={
-                                isWinner
-                                  ? 'Fornecedor vencedor atual para este produto'
-                                  : 'Clique para escolher este fornecedor para o produto'
-                              }
                             >
                               {/* Left: Rank badge, Name, Tag */}
                               <div className="flex items-center gap-2.5 min-w-0">
@@ -1654,7 +1912,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                                       <span className="px-2 py-0.5 rounded-full text-[9.5px] font-black bg-emerald-200/80 text-emerald-900 border border-emerald-300 flex items-center gap-1">
                                         <Trophy className="w-2.5 h-2.5 text-amber-600" />
                                         {isCustomChoice
-                                          ? 'Ganhador Escolhido'
+                                          ? 'Vencedor Escolhido'
                                           : '1º Lugar (Menor Preço)'}
                                       </span>
                                     )}
@@ -1682,20 +1940,45 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                                 </div>
 
                                 {isWinner ? (
-                                  <div className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-black shadow-xs">
-                                    <CheckCircle2 className="w-3.5 h-3.5" />
-                                    <span className="hidden sm:inline">Vencedor</span>
+                                  <div className="flex items-center gap-1.5">
+                                    <div className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-600 text-white text-[11px] font-black shadow-xs">
+                                      <CheckCircle2 className="w-3.5 h-3.5" />
+                                      <span className="hidden sm:inline">Vencedor</span>
+                                    </div>
+                                    {/* Opção Desfazer para o vencedor escolhido (Requisito 5) */}
+                                    {isCustomChoice && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleUndoWinner(p.id);
+                                        }}
+                                        className="px-2 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-600 text-[10.5px] font-bold transition-all cursor-pointer shadow-2xs"
+                                        title="Remover escolha manual e voltar ao menor preço"
+                                      >
+                                        Desfazer
+                                      </button>
+                                    )}
                                   </div>
                                 ) : (
                                   <button
                                     type="button"
+                                    disabled={winnerSavingMap[p.id]?.status === 'saving'}
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      onSelectWinner?.(p.id, r.supplierId);
+                                      handleChooseWinner(p.id, r.supplierId, r.price, r.supplierName);
                                     }}
-                                    className="px-2.5 py-1 rounded-lg bg-white border border-slate-300 hover:bg-blue-600 hover:text-white hover:border-blue-600 text-slate-700 text-[11px] font-bold transition-all cursor-pointer shadow-2xs"
+                                    className="px-2.5 py-1 rounded-lg bg-white border border-slate-300 hover:bg-blue-600 hover:text-white hover:border-blue-600 text-slate-700 text-[11px] font-bold transition-all cursor-pointer shadow-2xs flex items-center gap-1.5 disabled:opacity-50"
                                   >
-                                    Escolher
+                                    {winnerSavingMap[p.id]?.status === 'saving' &&
+                                    winnerSavingMap[p.id]?.targetSupplierId === r.supplierId ? (
+                                      <>
+                                        <Loader2 className="w-3 h-3 animate-spin text-blue-600" />
+                                        <span>Salvando...</span>
+                                      </>
+                                    ) : (
+                                      <span>Escolher</span>
+                                    )}
                                   </button>
                                 )}
                               </div>

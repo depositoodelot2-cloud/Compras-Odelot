@@ -54,13 +54,19 @@ interface AdminModalProps {
   onSaveSupplier: (supplier: Supplier) => void;
   onDeleteSupplier: (supplierId: string) => void;
   activeList: PurchaseList;
+  lists?: PurchaseList[];
   products: ProductItem[];
   catalog: CatalogProduct[];
   onImportProducts: (imported: Partial<ProductItem>[]) => void;
   initialTab?: 'usuarios' | 'fornecedores' | 'planilhas' | 'catalogo';
   initialUserToEdit?: UserProfile | null;
   initialSupplierToEdit?: Supplier | null;
-  onAddFromCatalog?: (item: CatalogProduct, quantidade?: number, prioridade?: Priority) => void;
+  onAddFromCatalog?: (
+    item: CatalogProduct,
+    quantidade?: number,
+    prioridade?: Priority,
+    targetListId?: string
+  ) => void;
   onSaveCatalogItem?: (item: Omit<CatalogProduct, 'id'> & { id?: string }) => void;
   onDeleteCatalogItem?: (id: string) => void;
   onOpenClearCache?: () => void;
@@ -81,6 +87,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   onSaveSupplier,
   onDeleteSupplier,
   activeList,
+  lists = [],
   products,
   catalog,
   onImportProducts,
@@ -102,6 +109,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [newUserCor, setNewUserCor] = useState('#F97316');
   const [newUserAtivo, setNewUserAtivo] = useState(true);
   const [showSwitchDropdown, setShowSwitchDropdown] = useState(false);
+  const [switchToastMessage, setSwitchToastMessage] = useState<string | null>(null);
 
   // Supplier state
   const [showNewSupplierForm, setShowNewSupplierForm] = useState(false);
@@ -144,8 +152,27 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [isCatalogBarcodeScannerOpen, setIsCatalogBarcodeScannerOpen] = useState(false);
   const [isSearchBarcodeScannerOpen, setIsSearchBarcodeScannerOpen] = useState(false);
   const [activeCatalogMenuId, setActiveCatalogMenuId] = useState<string | null>(null);
+  const [catalogMenuUpwards, setCatalogMenuUpwards] = useState(false);
   const [addedCatalogIds, setAddedCatalogIds] = useState<Record<string, boolean>>({});
   const [zoomedCatalogProduct, setZoomedCatalogProduct] = useState<CatalogProduct | null>(null);
+
+  // Listas disponíveis e controle de dropdown ao clicar no botão (+) do card de produto
+  const availableLists = lists && lists.length > 0 ? lists : activeList ? [activeList] : [];
+  const [addToListDropdownItemId, setAddToListDropdownItemId] = useState<string | null>(null);
+  const [addToListUpwards, setAddToListUpwards] = useState(false);
+  const [addedListFeedback, setAddedListFeedback] = useState<Record<string, string>>({});
+  const [catalogToastMessage, setCatalogToastMessage] = useState<string | null>(null);
+
+  // Fecha dropdowns de listas e opções ao clicar em qualquer lugar fora
+  useEffect(() => {
+    if (!addToListDropdownItemId && !activeCatalogMenuId) return;
+    const handleGlobalClick = () => {
+      setAddToListDropdownItemId(null);
+      setActiveCatalogMenuId(null);
+    };
+    document.addEventListener('click', handleGlobalClick);
+    return () => document.removeEventListener('click', handleGlobalClick);
+  }, [addToListDropdownItemId, activeCatalogMenuId]);
 
   // Import text
   const [csvText, setCsvText] = useState('');
@@ -313,8 +340,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       if (
         currentUser &&
         (currentUser.id === updatedUser.id ||
-          (currentUser.email && updatedUser.email && currentUser.email.toLowerCase() === updatedUser.email.toLowerCase()) ||
-          (currentUser.role === 'admin' && updatedUser.role === 'admin'))
+          (currentUser.email && updatedUser.email && currentUser.email.toLowerCase() === updatedUser.email.toLowerCase()))
       ) {
         onSwitchUser(updatedUser);
       }
@@ -519,10 +545,13 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     e.preventDefault();
     if (!catalogNome.trim()) return;
 
+    const savedName = capitalizeWords(catalogNome.trim());
+    const wasEdit = !!editingCatalogItem;
+
     if (onSaveCatalogItem) {
       onSaveCatalogItem({
         id: editingCatalogItem ? editingCatalogItem.id : undefined,
-        nome: capitalizeWords(catalogNome.trim()),
+        nome: savedName,
         marcaPadrao: catalogMarca.trim() || activeList?.fabrica || 'Geral',
         unidadePadrao: catalogUnidade,
         fabricaSugerida: catalogMarca.trim() || activeList?.fabrica || 'Geral',
@@ -536,15 +565,43 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     setShowCatalogForm(false);
     setCatalogNome('');
     setCatalogCodigoBarras('');
+    setCatalogToastMessage(
+      wasEdit
+        ? `Item "${savedName}" alterado na base com sucesso!`
+        : `Item "${savedName}" cadastrado na base com sucesso!`
+    );
+    setTimeout(() => {
+      setCatalogToastMessage(null);
+    }, 3000);
+  };
+
+  const handleAddToList = (item: CatalogProduct, list: PurchaseList) => {
+    if (onAddFromCatalog) {
+      const parsedQty = parseFloat(item.unidadePadrao);
+      const qty = !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1;
+      const listName = list.fabrica || list.nome || 'Lista';
+      onAddFromCatalog(item, qty, item.prioridadePadrao || 'cotacao', list.id);
+      setAddedCatalogIds((prev) => ({ ...prev, [item.id]: true }));
+      setAddedListFeedback((prev) => ({ ...prev, [item.id]: listName }));
+      setCatalogToastMessage(`"${item.nome}" incluído na lista "${listName}"!`);
+      setTimeout(() => {
+        setAddedCatalogIds((prev) => ({ ...prev, [item.id]: false }));
+        setAddedListFeedback((prev) => {
+          const copy = { ...prev };
+          delete copy[item.id];
+          return copy;
+        });
+      }, 2500);
+      setTimeout(() => {
+        setCatalogToastMessage(null);
+      }, 3500);
+    }
   };
 
   const handleQuickAdd = (item: CatalogProduct) => {
-    if (onAddFromCatalog) {
-      onAddFromCatalog(item, 1, item.prioridadePadrao || 'cotacao');
-      setAddedCatalogIds((prev) => ({ ...prev, [item.id]: true }));
-      setTimeout(() => {
-        setAddedCatalogIds((prev) => ({ ...prev, [item.id]: false }));
-      }, 1500);
+    const targetList = activeList || availableLists[0];
+    if (targetList) {
+      handleAddToList(item, targetList);
     }
   };
 
@@ -561,79 +618,9 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-lg font-black text-slate-900 leading-tight">
-                  Gerenciamento & Administração
+                  Configurações
                 </h2>
-                <button
-                  type="button"
-                  onClick={handleForceSyncFirebase}
-                  disabled={isSyncingFirebase}
-                  className="p-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 disabled:opacity-50 text-white rounded-lg transition-all cursor-pointer shadow-2xs shrink-0 flex items-center justify-center"
-                  title="Sincronizar com Firebase (enviar todos os dados salvos)"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingFirebase ? 'animate-spin' : ''}`} />
-                </button>
-                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-100 text-blue-800">
-                  Sessão Admin Ativa
-                </span>
-                <span className="px-2 py-0.5 rounded-full text-[10.5px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5 shadow-2xs">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  Firebase: {(firebaseConfig as any).projectId || 'Conectado'}
-                </span>
               </div>
-              {syncStatus && (
-                <div
-                  className={`mt-2 p-2.5 rounded-xl border text-xs font-medium animate-in fade-in flex flex-col gap-1.5 ${
-                    syncStatus.type === 'success'
-                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                      : syncStatus.type === 'permission'
-                      ? 'bg-amber-50 border-amber-300 text-amber-900'
-                      : 'bg-rose-50 border-rose-200 text-rose-800'
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 font-bold">
-                      {syncStatus.type === 'success' && <Check className="w-4 h-4 text-emerald-600 shrink-0" />}
-                      <span>{syncStatus.message}</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setSyncStatus(null)}
-                      className="text-slate-400 hover:text-slate-700 text-xs cursor-pointer p-0.5"
-                    >
-                      ✕
-                    </button>
-                  </div>
-
-                  {syncStatus.type === 'permission' && (
-                    <div className="pt-1.5 border-t border-amber-200/80 text-[11px] leading-relaxed space-y-1.5">
-                      <p>
-                        Para autorizar gravação no seu Firestore, acesse a aba <strong>Regras (Rules)</strong> no Firebase Console e publique:
-                      </p>
-                      <pre className="p-2 bg-slate-900 text-emerald-400 rounded-lg text-[10px] font-mono overflow-x-auto select-all">
-                        {`rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /{document=**} {\n      allow read, write: if true;\n    }\n  }\n}`}
-                      </pre>
-                      <div className="flex items-center gap-2 pt-0.5">
-                        <button
-                          type="button"
-                          onClick={copyFirestoreRulesToClipboard}
-                          className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-[10.5px] cursor-pointer transition-colors shadow-2xs"
-                        >
-                          {copiedRules ? '✓ Regras Copiadas!' : 'Copiar Regras'}
-                        </button>
-                        <a
-                          href={`https://console.firebase.google.com/project/${(firebaseConfig as any).projectId || 'app-compra-8cae5'}/firestore/rules`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold rounded-lg text-[10.5px] cursor-pointer transition-colors inline-flex items-center gap-1"
-                        >
-                          <span>Abrir Firebase Console</span>
-                          <ExternalLink className="w-3 h-3 text-slate-400" />
-                        </a>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           </div>
 
@@ -647,12 +634,6 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
         {/* System Modules Cards - compact version */}
         <div className="px-5 py-2.5 bg-slate-50/60 border-b border-slate-100">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10.5px] font-extrabold uppercase tracking-wider text-slate-600">
-              Módulos do Sistema
-            </span>
-          </div>
-
           <div className="grid grid-cols-3 gap-2">
             {/* Google Sheets / Planilhas */}
             <button
@@ -811,6 +792,8 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           onClick={() => {
                             onSwitchUser(u);
                             setShowSwitchDropdown(false);
+                            setSwitchToastMessage(`Você agora está operando como ${u.nome}!`);
+                            setTimeout(() => setSwitchToastMessage(null), 3500);
                           }}
                           className={`w-full p-2.5 rounded-xl flex items-center justify-between text-left transition-all cursor-pointer ${
                             isCurrent
@@ -998,6 +981,14 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     </button>
                   </div>
 
+                  {/* Banner de Confirmação de Troca de Usuário */}
+                  {switchToastMessage && (
+                    <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold flex items-center gap-2 animate-in fade-in duration-150">
+                      <Check className="w-4 h-4 text-emerald-600 stroke-[3] shrink-0" />
+                      <span>{switchToastMessage}</span>
+                    </div>
+                  )}
+
                   {users.map((u) => {
                     const isCurrent = u.id === currentUser?.id;
                     const colorHex = getUserColorHex(u.cor);
@@ -1005,7 +996,11 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     return (
                       <div
                         key={u.id}
-                        className="p-2.5 sm:p-3 bg-white rounded-xl border border-slate-200/90 shadow-2xs hover:border-blue-300 transition-all space-y-2"
+                        className={`p-2.5 sm:p-3 bg-white rounded-xl border shadow-2xs transition-all space-y-2 ${
+                          isCurrent
+                            ? 'border-blue-400 ring-2 ring-blue-500/20'
+                            : 'border-slate-200/90 hover:border-blue-300'
+                        }`}
                       >
                         {/* Top: Avatar & User Info */}
                         <div className="flex items-center gap-2.5 min-w-0">
@@ -1057,15 +1052,25 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                             <Edit2 className="w-3.5 h-3.5" />
                           </button>
 
-                          {/* Botão Entrar */}
-                          {!isCurrent && (
+                          {/* Botão Entrar ou Indicador Conectado */}
+                          {isCurrent ? (
+                            <div className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-black flex items-center gap-1 shadow-2xs">
+                              <Check className="w-3.5 h-3.5 text-emerald-600 stroke-[3]" />
+                              <span>Conectado</span>
+                            </div>
+                          ) : (
                             <button
                               type="button"
-                              onClick={() => onSwitchUser(u)}
-                              className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 text-xs font-bold cursor-pointer transition-colors shadow-2xs"
+                              onClick={() => {
+                                onSwitchUser(u);
+                                setSwitchToastMessage(`Você agora está conectado como ${u.nome} (${u.cargo || u.role})!`);
+                                setTimeout(() => setSwitchToastMessage(null), 3500);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700 hover:bg-blue-600 hover:text-white text-xs font-bold cursor-pointer transition-colors shadow-2xs flex items-center gap-1"
                               title="Alternar para este usuário"
                             >
-                              Entrar
+                              <UserCheck className="w-3.5 h-3.5" />
+                              <span>Entrar</span>
                             </button>
                           )}
 
@@ -1402,6 +1407,85 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           {/* TAB: PLANILHAS & EXPORTAÇÃO */}
           {activeTab === 'planilhas' && (
             <div className="space-y-4">
+              {/* Informações de Conexão e Sessão */}
+              <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-blue-100 text-blue-800">
+                    Sessão Admin Ativa
+                  </span>
+                  <span className="px-2.5 py-1 rounded-full text-[10.5px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1.5 shadow-2xs">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    Firebase: {(firebaseConfig as any).projectId || 'Conectado'}
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleForceSyncFirebase}
+                  disabled={isSyncingFirebase}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-2xs flex items-center gap-1.5"
+                  title="Sincronizar com Firebase (enviar todos os dados salvos)"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingFirebase ? 'animate-spin' : ''}`} />
+                  <span>{isSyncingFirebase ? 'Sincronizando...' : 'Sincronizar'}</span>
+                </button>
+              </div>
+
+              {syncStatus && (
+                <div
+                  className={`p-3 rounded-xl border text-xs font-medium animate-in fade-in flex flex-col gap-1.5 ${
+                    syncStatus.type === 'success'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : syncStatus.type === 'permission'
+                      ? 'bg-amber-50 border-amber-300 text-amber-900'
+                      : 'bg-rose-50 border-rose-200 text-rose-800'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 font-bold">
+                      {syncStatus.type === 'success' && <Check className="w-4 h-4 text-emerald-600 shrink-0" />}
+                      <span>{syncStatus.message}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSyncStatus(null)}
+                      className="text-slate-400 hover:text-slate-700 text-xs cursor-pointer p-0.5"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  {syncStatus.type === 'permission' && (
+                    <div className="pt-1.5 border-t border-amber-200/80 text-[11px] leading-relaxed space-y-1.5">
+                      <p>
+                        Para autorizar gravação no seu Firestore, acesse a aba <strong>Regras (Rules)</strong> no Firebase Console e publique:
+                      </p>
+                      <pre className="p-2 bg-slate-900 text-emerald-400 rounded-lg text-[10px] font-mono overflow-x-auto select-all">
+                        {`rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /{document=**} {\n      allow read, write: if true;\n    }\n  }\n}`}
+                      </pre>
+                      <div className="flex items-center gap-2 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={copyFirestoreRulesToClipboard}
+                          className="px-2.5 py-1 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-[10.5px] cursor-pointer transition-colors shadow-2xs"
+                        >
+                          {copiedRules ? '✓ Regras Copiadas!' : 'Copiar Regras'}
+                        </button>
+                        <a
+                          href={`https://console.firebase.google.com/project/${(firebaseConfig as any).projectId || 'app-compra-8cae5'}/firestore/rules`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 font-bold rounded-lg text-[10.5px] cursor-pointer transition-colors inline-flex items-center gap-1"
+                        >
+                          <span>Abrir Firebase Console</span>
+                          <ExternalLink className="w-3 h-3 text-slate-400" />
+                        </a>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="p-4 bg-emerald-50/80 rounded-2xl border border-emerald-200">
                 <h4 className="text-xs font-black text-emerald-900 uppercase mb-1">
                   Exportar Lista Atual ({activeList?.nome || 'Lista Atual'})
@@ -1510,210 +1594,21 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 </button>
               </div>
 
-              {/* Form to Add or Edit Catalog Item */}
-              {showCatalogForm && (
-                <form
-                  onSubmit={handleSaveCatalogSubmit}
-                  className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3 animate-in fade-in duration-150"
-                >
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-extrabold uppercase text-slate-700">
-                      {editingCatalogItem ? 'Editar Item da Base' : 'Cadastrar Item na Base'}
-                    </h4>
-                    <button
-                      type="button"
-                      onClick={() => setShowCatalogForm(false)}
-                      className="text-slate-400 hover:text-slate-600 text-xs font-bold"
-                    >
-                      Cancelar
-                    </button>
-                  </div>
-
-                  {/* Prioridade Padrão acima do Nome do Produto com botões em formato de pílulas */}
-                  <div>
-                    <label className="text-[11px] font-bold text-slate-600 block mb-1.5">
-                      Prioridade Padrão
-                    </label>
-                    <div className="flex items-center gap-2">
-                      {/* Fixo (F) */}
-                      <button
-                        type="button"
-                        onClick={() => setCatalogPrioridade('fixo')}
-                        className={`flex-1 py-1.5 px-2 rounded-full text-xs font-bold transition-all text-center cursor-pointer shadow-2xs border ${
-                          catalogPrioridade === 'fixo'
-                            ? 'bg-blue-600 text-white border-blue-600 ring-2 ring-blue-300'
-                            : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
-                        }`}
-                      >
-                        F <span className="font-semibold text-[11px] opacity-90">({catalogPriorityCounts.fixo})</span>
-                      </button>
-
-                      {/* Novo (N) */}
-                      <button
-                        type="button"
-                        onClick={() => setCatalogPrioridade('novo')}
-                        className={`flex-1 py-1.5 px-2 rounded-full text-xs font-bold transition-all text-center cursor-pointer shadow-2xs border ${
-                          catalogPrioridade === 'novo'
-                            ? 'bg-emerald-600 text-white border-emerald-600 ring-2 ring-emerald-300'
-                            : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
-                        }`}
-                      >
-                        N <span className="font-semibold text-[11px] opacity-90">({catalogPriorityCounts.novo})</span>
-                      </button>
-
-                      {/* Cotacao (C) */}
-                      <button
-                        type="button"
-                        onClick={() => setCatalogPrioridade('cotacao')}
-                        className={`flex-1 py-1.5 px-2 rounded-full text-xs font-bold transition-all text-center cursor-pointer shadow-2xs border ${
-                          catalogPrioridade === 'cotacao'
-                            ? 'bg-amber-600 text-white border-amber-600 ring-2 ring-amber-300'
-                            : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
-                        }`}
-                      >
-                        C <span className="font-semibold text-[11px] opacity-90">({catalogPriorityCounts.cotacao})</span>
-                      </button>
-
-                      {/* Urgente (U) */}
-                      <button
-                        type="button"
-                        onClick={() => setCatalogPrioridade('urgente')}
-                        className={`flex-1 py-1.5 px-2 rounded-full text-xs font-bold transition-all text-center cursor-pointer shadow-2xs border ${
-                          catalogPrioridade === 'urgente'
-                            ? 'bg-rose-600 text-white border-rose-600 ring-2 ring-rose-300 animate-pulse'
-                            : 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
-                        }`}
-                      >
-                        U <span className="font-semibold text-[11px] opacity-90">({catalogPriorityCounts.urgente})</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-[11px] font-bold text-slate-600 block mb-1">
-                      Nome do Produto *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      placeholder="Ex: Tubo Soldável 25mm 3m"
-                      value={catalogNome}
-                      onChange={(e) => setCatalogNome(capitalizeWords(e.target.value))}
-                      className="w-full px-3 py-2 bg-white rounded-xl border border-slate-300 text-xs font-semibold outline-hidden"
-                    />
-                  </div>
-
-                  {/* Código de Barras e Quantidade na mesma linha */}
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="text-[11px] font-bold text-slate-600 block mb-1">
-                        Código de Barras (Opcional)
-                      </label>
-                      <div className="relative flex items-center">
-                        <input
-                          type="text"
-                          placeholder="Ex: 7891000100103"
-                          value={catalogCodigoBarras}
-                          onChange={(e) => setCatalogCodigoBarras(e.target.value)}
-                          className="w-full pl-3 pr-10 py-2 bg-white rounded-xl border border-slate-300 text-xs font-semibold outline-hidden"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setIsCatalogBarcodeScannerOpen(true)}
-                          className="absolute right-2 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer p-1"
-                          title="Ler Código de Barras com a Câmera"
-                        >
-                          <ScanBarcode className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-[11px] font-bold text-slate-600 block mb-1">
-                        Quantidade
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="Ex: UN, CX, 1..."
-                        value={catalogUnidade}
-                        onChange={(e) => setCatalogUnidade(e.target.value)}
-                        className="w-full px-3 py-2 bg-white rounded-xl border border-slate-300 text-xs font-semibold outline-hidden"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Foto do produto na base */}
-                  <div>
-                    <label className="text-[11px] font-bold text-slate-600 block mb-1">
-                      Foto do Produto (Opcional)
-                    </label>
-                    <div className="flex items-center justify-between p-2 bg-white rounded-xl border border-slate-200">
-                      <div className="flex items-center gap-2">
-                        {catalogFotoUrl ? (
-                          <div className="relative w-10 h-10 rounded-lg overflow-hidden border border-slate-200">
-                            <img
-                              src={catalogFotoUrl}
-                              alt="Foto"
-                              className="w-full h-full object-cover"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => setCatalogFotoUrl('')}
-                              className="absolute top-0 right-0 p-0.5 bg-rose-600 text-white rounded-bl"
-                            >
-                              <X className="w-2.5 h-2.5" />
-                            </button>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-slate-400 pl-1">Sem foto</span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setIsCatalogCameraOpen(true)}
-                          className="w-8 h-8 rounded-lg bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center transition-colors cursor-pointer"
-                          title="Tirar foto com a câmera"
-                        >
-                          <Camera className="w-4 h-4" />
-                        </button>
-                        <label className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 flex items-center justify-center transition-colors cursor-pointer">
-                          <ImageIcon className="w-4 h-4" />
-                          <input
-                            type="file"
-                            accept="image/*"
-                            onChange={async (e) => {
-                              const file = e.target.files?.[0];
-                              if (file) {
-                                try {
-                                  const compressed = await compressImage(file, 640, 640, 0.70);
-                                  setCatalogFotoUrl(compressed);
-                                } catch (err) {
-                                  console.warn('Erro ao processar imagem do catálogo:', err);
-                                }
-                              }
-                            }}
-                            className="hidden"
-                          />
-                        </label>
-                      </div>
-                    </div>
-                  </div>
-
-                  <button
-                    type="submit"
-                    className="w-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer"
-                  >
-                    {editingCatalogItem ? 'Salvar Alterações na Base' : 'Salvar na Base Permanente'}
-                  </button>
-                </form>
+              {/* Toast message de inclusão de produto em lista */}
+              {catalogToastMessage && (
+                <div className="p-2.5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-bold flex items-center gap-2 animate-in fade-in duration-150 shadow-2xs">
+                  <Check className="w-4 h-4 text-emerald-600 stroke-[3] shrink-0" />
+                  <span className="truncate">{catalogToastMessage}</span>
+                </div>
               )}
+
+
 
               {/* Header subtitle */}
               <div className="flex items-center justify-between text-xs text-slate-500 font-medium px-1">
                 <span>
-                  Base permanente ({catalog.length} itens) • Fábrica ativa:{' '}
-                  <strong className="text-slate-700">{activeList?.fabrica || 'Principal'}</strong>
+                  Base permanente ({catalog.length} itens) • Lista ativa:{' '}
+                  <strong className="text-slate-700">{activeList?.fabrica || activeList?.nome || 'Principal'}</strong>
                 </span>
               </div>
 
@@ -1733,6 +1628,30 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                   .map((item) => {
                     const isAdded = !!addedCatalogIds[item.id];
                     const pStyle = getPriorityStyle(item.prioridadePadrao || 'cotacao');
+
+                    // Identifica se este produto do catálogo está presente em alguma lista
+                    const matchingProducts = products.filter((p) => {
+                      const matchByName =
+                        p.nome && item.nome && p.nome.trim().toLowerCase() === item.nome.trim().toLowerCase();
+                      const matchByBarcode =
+                        item.codigoBarras &&
+                        item.codigoBarras.trim() &&
+                        p.codigoBarras &&
+                        p.codigoBarras.trim() &&
+                        item.codigoBarras.trim() === p.codigoBarras.trim();
+                      return matchByName || matchByBarcode;
+                    });
+
+                    const inListNames = Array.from(
+                      new Set(
+                        matchingProducts
+                          .map((p) => {
+                            const found = (availableLists || []).find((l) => l.id === p.listaId);
+                            return found ? (found.fabrica || found.nome) : null;
+                          })
+                          .filter(Boolean) as string[]
+                      )
+                    );
 
                     return (
                       <div
@@ -1784,20 +1703,38 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           )}
                         </div>
 
-                        {/* 2. Center Content - exact match to user image */}
+                        {/* 2. Center Content - clean, optimized layout with clear product name view */}
                         <div
                           className="min-w-0 flex-1 cursor-pointer"
                           onClick={() => handleQuickAdd(item)}
                         >
-                          {/* Nome do produto */}
+                          {/* Linha 1: Nome do produto com tipografia nítida e destacada */}
                           <h3
-                            className="font-bold text-xs sm:text-sm leading-tight tracking-tight truncate hover:text-blue-700 transition-colors text-slate-900"
+                            className="font-extrabold text-[13px] sm:text-sm leading-tight tracking-tight truncate hover:text-blue-700 transition-colors text-slate-900"
                             title={item.nome}
                           >
                             {item.nome}
                           </h3>
 
-                          {/* Nome da prioridade + Círculo do Usuário + Número da Quantidade em azul */}
+                          {/* Linha 2: Nome da lista na linha abaixo do nome do produto (quando estiver em alguma lista) */}
+                          {inListNames.length > 0 && (
+                            <div className="flex items-center gap-1 mt-0.5 mb-1 flex-wrap">
+                              <span
+                                className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10.5px] font-bold bg-blue-50/90 text-blue-700 border border-blue-200/80 leading-none shadow-2xs max-w-full"
+                                title={`Presente na lista: ${inListNames.join(', ')}`}
+                              >
+                                <span className="w-1.5 h-1.5 rounded-full bg-blue-600 shrink-0" />
+                                <span className="text-slate-500 font-semibold text-[10px]">
+                                  {inListNames.length > 1 ? 'Listas:' : 'Lista:'}
+                                </span>
+                                <span className="font-extrabold text-blue-900 truncate">
+                                  {inListNames.join(', ')}
+                                </span>
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Linha 3: Prioridade + Usuário + Quantidade + Código de Barras */}
                           <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                             {/* Nome da Prioridade */}
                             <span
@@ -1840,34 +1777,128 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           </div>
                         </div>
 
-                        {/* 3. Action Buttons: Single (+) Button without the word Adicionar, plus 3-dots */}
+                        {/* 3. Action Buttons: (+) Button with Dropdown of Lists + 3-dots */}
                         <div className="relative shrink-0 flex items-center gap-1">
-                          {/* Botão com o sinal de mais (+) sem a palavra adicionar */}
-                          <button
-                            type="button"
-                            onClick={() => handleQuickAdd(item)}
-                            className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all cursor-pointer shadow-2xs active:scale-95 ${
-                              isAdded
-                                ? 'bg-emerald-600 text-white shadow-emerald-500/20'
-                                : 'bg-blue-50 text-blue-600 hover:bg-blue-600 hover:text-white border border-blue-200/80 hover:border-blue-600'
-                            }`}
-                            title={isAdded ? 'Adicionado à lista atual!' : `Adicionar "${item.nome}" à lista`}
-                          >
-                            {isAdded ? (
-                              <Check className="w-4 h-4 stroke-[3]" />
-                            ) : (
-                              <Plus className="w-4 h-4 stroke-[2.8]" />
+                          {/* Botão com o sinal de mais (+) que abre dropdown com as listas existentes */}
+                          <div className="relative">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setActiveCatalogMenuId(null);
+                                if (addToListDropdownItemId === item.id) {
+                                  setAddToListDropdownItemId(null);
+                                } else {
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  setAddToListUpwards(window.innerHeight - rect.bottom < 250);
+                                  setAddToListDropdownItemId(item.id);
+                                }
+                              }}
+                              className={`w-8 h-8 rounded-xl flex items-center justify-center transition-all cursor-pointer shadow-2xs active:scale-95 ${
+                                isAdded
+                                  ? 'bg-emerald-600 text-white shadow-emerald-500/20'
+                                  : addToListDropdownItemId === item.id
+                                  ? 'bg-blue-600 text-white ring-2 ring-blue-300 shadow-md'
+                                  : 'bg-blue-50 text-blue-600 hover:bg-blue-600 hover:text-white border border-blue-200/80 hover:border-blue-600'
+                              }`}
+                              title={
+                                isAdded
+                                  ? `Adicionado à ${addedListFeedback[item.id] || 'lista'}!`
+                                  : `Escolher em qual lista incluir "${item.nome}"`
+                              }
+                            >
+                              {isAdded ? (
+                                <Check className="w-4 h-4 stroke-[3]" />
+                              ) : (
+                                <Plus className="w-4 h-4 stroke-[2.8]" />
+                              )}
+                            </button>
+
+                            {/* Dropdown com os nomes das listas existentes */}
+                            {addToListDropdownItemId === item.id && (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className={`absolute right-0 z-50 w-56 sm:w-64 bg-white rounded-2xl shadow-2xl border border-slate-200 py-1.5 animate-in fade-in zoom-in-95 duration-150 ${
+                                  addToListUpwards
+                                    ? 'bottom-full mb-1.5 origin-bottom-right'
+                                    : 'top-full mt-1.5 origin-top-right'
+                                }`}
+                              >
+                                <div className="px-3 py-2 border-b border-slate-100 flex items-center justify-between bg-slate-50/80 rounded-t-2xl">
+                                  <div className="flex items-center gap-1.5">
+                                    <FileSpreadsheet className="w-3.5 h-3.5 text-blue-600" />
+                                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-700">
+                                      Incluir na Lista:
+                                    </span>
+                                  </div>
+                                  <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-md border border-blue-200/60">
+                                    {availableLists.length} {availableLists.length === 1 ? 'lista' : 'listas'}
+                                  </span>
+                                </div>
+
+                                <div className="p-1 max-h-52 overflow-y-auto space-y-0.5">
+                                  {availableLists.length === 0 ? (
+                                    <div className="p-3 text-center text-xs text-slate-400">
+                                      Nenhuma lista cadastrada no momento
+                                    </div>
+                                  ) : (
+                                    availableLists.map((l) => {
+                                      const isCurrent = l.id === activeList?.id;
+                                      const listTitle = l.fabrica || l.nome || 'Lista';
+                                      return (
+                                        <button
+                                          key={l.id}
+                                          type="button"
+                                          onClick={() => {
+                                            handleAddToList(item, l);
+                                            setAddToListDropdownItemId(null);
+                                          }}
+                                          className={`w-full px-2.5 py-2 rounded-xl text-left text-xs font-bold flex items-center justify-between gap-2 transition-all cursor-pointer group ${
+                                            isCurrent
+                                              ? 'bg-blue-50/70 hover:bg-blue-100/80 text-blue-900 border border-blue-200/60 shadow-2xs'
+                                              : 'hover:bg-slate-100 text-slate-700 hover:text-slate-900 border border-transparent'
+                                          }`}
+                                        >
+                                          <div className="flex items-center gap-2 min-w-0">
+                                            <div
+                                              className={`w-2 h-2 rounded-full shrink-0 ${
+                                                isCurrent
+                                                  ? 'bg-blue-600 ring-2 ring-blue-300'
+                                                  : 'bg-slate-300 group-hover:bg-blue-500'
+                                              }`}
+                                            />
+                                            <span className="truncate">{listTitle}</span>
+                                          </div>
+                                          {isCurrent ? (
+                                            <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded-md bg-blue-600 text-white shrink-0">
+                                              Ativa
+                                            </span>
+                                          ) : (
+                                            <Plus className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-600 shrink-0" />
+                                          )}
+                                        </button>
+                                      );
+                                    })
+                                  )}
+                                </div>
+                              </div>
                             )}
-                          </button>
+                          </div>
 
                           {/* 3-dots menu button */}
                           <button
                             type="button"
-                            onClick={() =>
-                              setActiveCatalogMenuId(
-                                activeCatalogMenuId === item.id ? null : item.id
-                              )
-                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAddToListDropdownItemId(null);
+                              if (activeCatalogMenuId === item.id) {
+                                setActiveCatalogMenuId(null);
+                              } else {
+                                const rect = e.currentTarget.getBoundingClientRect();
+                                setCatalogMenuUpwards(window.innerHeight - rect.bottom < 200);
+                                setActiveCatalogMenuId(item.id);
+                              }
+                            }}
                             className="w-8 h-8 rounded-xl hover:bg-slate-100 flex items-center justify-center text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
                             title="Opções do item"
                           >
@@ -1876,7 +1907,13 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
                           {/* Dropdown Options */}
                           {activeCatalogMenuId === item.id && (
-                            <div className="absolute right-0 top-8 z-30 w-48 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 animate-in fade-in zoom-in-95 duration-150">
+                            <div
+                              className={`absolute right-0 z-50 w-48 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 animate-in fade-in zoom-in-95 duration-150 max-h-[min(260px,75vh)] overflow-y-auto ${
+                                catalogMenuUpwards
+                                  ? 'bottom-full mb-1 origin-bottom-right'
+                                  : 'top-full mt-1 origin-top-right'
+                              }`}
+                            >
                               <button
                                 type="button"
                                 onClick={() => {
@@ -1938,6 +1975,271 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Tela Modal de Cadastro / Edição de Item da Base */}
+      {showCatalogForm && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-xs animate-in fade-in duration-150"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setShowCatalogForm(false);
+            }
+          }}
+        >
+          <div
+            className="bg-white w-full max-w-lg rounded-3xl shadow-2xl border border-slate-200 overflow-hidden flex flex-col max-h-[92vh] animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-white shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-blue-50 border border-blue-200 text-blue-600 flex items-center justify-center shrink-0 shadow-2xs">
+                  {editingCatalogItem ? <Edit3 className="w-5 h-5 text-blue-600" /> : <Plus className="w-5 h-5 text-blue-600" />}
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-800">
+                    {editingCatalogItem ? 'Editar Item da Base' : 'Cadastrar Item na Base'}
+                  </h3>
+                  <p className="text-[11px] text-slate-500 font-medium line-clamp-1">
+                    {editingCatalogItem ? editingCatalogItem.nome : 'Adicione um novo produto à base permanente'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCatalogForm(false)}
+                className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-800 flex items-center justify-center transition-colors cursor-pointer"
+                title="Fechar"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Scrollable Form Body */}
+            <form onSubmit={handleSaveCatalogSubmit} className="flex-1 flex flex-col overflow-hidden">
+              <div className="p-5 space-y-4 overflow-y-auto flex-1">
+                {/* Prioridade Padrão */}
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-2">
+                    Prioridade Padrão
+                  </label>
+                  <div className="flex items-center gap-2">
+                    {/* Fixo (F) */}
+                    <button
+                      type="button"
+                      onClick={() => setCatalogPrioridade('fixo')}
+                      className={`flex-1 py-2 px-2 rounded-xl text-xs font-bold transition-all text-center cursor-pointer shadow-2xs border ${
+                        catalogPrioridade === 'fixo'
+                          ? 'bg-blue-600 text-white border-blue-600 ring-2 ring-blue-300'
+                          : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                      }`}
+                    >
+                      Fixo (F) <span className="font-semibold text-[11px] opacity-90">({catalogPriorityCounts.fixo})</span>
+                    </button>
+
+                    {/* Novo (N) */}
+                    <button
+                      type="button"
+                      onClick={() => setCatalogPrioridade('novo')}
+                      className={`flex-1 py-2 px-2 rounded-xl text-xs font-bold transition-all text-center cursor-pointer shadow-2xs border ${
+                        catalogPrioridade === 'novo'
+                          ? 'bg-emerald-600 text-white border-emerald-600 ring-2 ring-emerald-300'
+                          : 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                      }`}
+                    >
+                      Novo (N) <span className="font-semibold text-[11px] opacity-90">({catalogPriorityCounts.novo})</span>
+                    </button>
+
+                    {/* Cotacao (C) */}
+                    <button
+                      type="button"
+                      onClick={() => setCatalogPrioridade('cotacao')}
+                      className={`flex-1 py-2 px-2 rounded-xl text-xs font-bold transition-all text-center cursor-pointer shadow-2xs border ${
+                        catalogPrioridade === 'cotacao'
+                          ? 'bg-amber-600 text-white border-amber-600 ring-2 ring-amber-300'
+                          : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+                      }`}
+                    >
+                      Cotação (C) <span className="font-semibold text-[11px] opacity-90">({catalogPriorityCounts.cotacao})</span>
+                    </button>
+
+                    {/* Urgente (U) */}
+                    <button
+                      type="button"
+                      onClick={() => setCatalogPrioridade('urgente')}
+                      className={`flex-1 py-2 px-2 rounded-xl text-xs font-bold transition-all text-center cursor-pointer shadow-2xs border ${
+                        catalogPrioridade === 'urgente'
+                          ? 'bg-rose-600 text-white border-rose-600 ring-2 ring-rose-300 animate-pulse'
+                          : 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+                      }`}
+                    >
+                      Urgente (U) <span className="font-semibold text-[11px] opacity-90">({catalogPriorityCounts.urgente})</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Nome do Produto */}
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Nome do Produto <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    placeholder="Ex: Tubo Soldável 25mm 3m"
+                    value={catalogNome}
+                    onChange={(e) => setCatalogNome(capitalizeWords(e.target.value))}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 focus:bg-white rounded-xl border border-slate-300 focus:border-blue-500 text-xs font-semibold outline-hidden transition-all"
+                  />
+                </div>
+
+                {/* Código de Barras e Quantidade / Unidade */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 block mb-1">
+                      Código de Barras (Opcional)
+                    </label>
+                    <div className="relative flex items-center">
+                      <input
+                        type="text"
+                        placeholder="Ex: 7891000100103"
+                        value={catalogCodigoBarras}
+                        onChange={(e) => setCatalogCodigoBarras(e.target.value)}
+                        className="w-full pl-3.5 pr-10 py-2.5 bg-slate-50 focus:bg-white rounded-xl border border-slate-300 focus:border-blue-500 text-xs font-semibold outline-hidden transition-all"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setIsCatalogBarcodeScannerOpen(true)}
+                        className="absolute right-2 text-slate-400 hover:text-blue-600 transition-colors cursor-pointer p-1.5 rounded-lg hover:bg-slate-100"
+                        title="Ler Código de Barras com a Câmera"
+                      >
+                        <ScanBarcode className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-xs font-bold text-slate-700 block mb-1">
+                      Quantidade / Unidade Padrão
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ex: UN, CX, 1, 10..."
+                      value={catalogUnidade}
+                      onChange={(e) => setCatalogUnidade(e.target.value)}
+                      className="w-full px-3.5 py-2.5 bg-slate-50 focus:bg-white rounded-xl border border-slate-300 focus:border-blue-500 text-xs font-semibold outline-hidden transition-all"
+                    />
+                  </div>
+                </div>
+
+                {/* Marca / Fábrica Padrão */}
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1">
+                    Marca / Fábrica Padrão (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: Tigre, Amanco, Geral..."
+                    value={catalogMarca}
+                    onChange={(e) => setCatalogMarca(e.target.value)}
+                    className="w-full px-3.5 py-2.5 bg-slate-50 focus:bg-white rounded-xl border border-slate-300 focus:border-blue-500 text-xs font-semibold outline-hidden transition-all"
+                  />
+                </div>
+
+                {/* Foto do produto na base */}
+                <div>
+                  <label className="text-xs font-bold text-slate-700 block mb-1.5">
+                    Foto do Produto (Opcional)
+                  </label>
+                  <div className="flex items-center justify-between p-3 bg-slate-50 rounded-2xl border border-slate-200">
+                    <div className="flex items-center gap-3">
+                      {catalogFotoUrl ? (
+                        <div className="relative w-12 h-12 rounded-xl overflow-hidden border border-slate-200 shadow-2xs group">
+                          <img
+                            src={catalogFotoUrl}
+                            alt="Foto do produto"
+                            className="w-full h-full object-cover"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setCatalogFotoUrl('')}
+                            className="absolute top-0 right-0 p-1 bg-rose-600 hover:bg-rose-700 text-white rounded-bl-lg transition-colors cursor-pointer"
+                            title="Remover foto"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="w-12 h-12 rounded-xl bg-slate-100 border border-dashed border-slate-300 flex items-center justify-center text-slate-400">
+                          <ImageIcon className="w-5 h-5 opacity-60" />
+                        </div>
+                      )}
+                      <div>
+                        <span className="text-xs font-bold text-slate-700 block">
+                          {catalogFotoUrl ? 'Foto anexada' : 'Nenhuma foto anexada'}
+                        </span>
+                        <span className="text-[11px] text-slate-400">
+                          {catalogFotoUrl ? 'Clique no X para remover ou tire outra' : 'Tire com a câmera ou escolha da galeria'}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsCatalogCameraOpen(true)}
+                        className="px-3 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white flex items-center gap-1.5 text-xs font-bold transition-colors cursor-pointer shadow-2xs"
+                        title="Tirar foto com a câmera"
+                      >
+                        <Camera className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Câmera</span>
+                      </button>
+                      <label className="px-3 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 flex items-center gap-1.5 text-xs font-bold transition-colors cursor-pointer shadow-2xs">
+                        <ImageIcon className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Galeria</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            if (file) {
+                              try {
+                                const compressed = await compressImage(file, 640, 640, 0.70);
+                                setCatalogFotoUrl(compressed);
+                              } catch (err) {
+                                console.warn('Erro ao processar imagem do catálogo:', err);
+                              }
+                            }
+                          }}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Modal Footer */}
+              <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setShowCatalogForm(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-600 text-xs font-bold transition-colors cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-colors cursor-pointer shadow-2xs flex items-center gap-1.5"
+                >
+                  <Check className="w-4 h-4 stroke-[2.5]" />
+                  <span>{editingCatalogItem ? 'Salvar Alterações na Base' : 'Cadastrar na Base Permanente'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Camera Capture Modal for Catalog */}
       <CameraModal

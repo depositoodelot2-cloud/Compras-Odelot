@@ -12,6 +12,8 @@ import {
 import {
   initializeStorage,
   subscribeToCollection,
+  subscribeToProducts,
+  ProductStats,
   saveDocument,
   removeDocument,
   STORAGE_KEYS,
@@ -121,6 +123,7 @@ export default function App() {
   // Application Data States
   const [lists, setLists] = useState<PurchaseList[]>([]);
   const [products, setProducts] = useState<ProductItem[]>([]);
+  const [productStats, setProductStats] = useState<ProductStats | null>(null);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [quotes, setQuotes] = useState<SupplierQuote[]>([]);
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -133,14 +136,86 @@ export default function App() {
     getLocal<UserProfile | null>(STORAGE_KEYS.ACTIVE_USER, null)
   );
 
-  // Active UI Navigation & Filters
-  const [currentTab, setCurrentTab] = useState<'lista' | 'cotacoes'>('lista');
+  // Determina a aba inicial: sempre abre na tela LISTA ao abrir o app (nova sessão/início),
+  // mas em caso de refresh (F5/recarregamento da página), permanece na tela em que estava.
+  const [currentTab, setCurrentTab] = useState<'lista' | 'cotacoes'>(() => {
+    if (typeof window === 'undefined') return 'lista';
+
+    // 1. Detecta se o carregamento atual foi um REFRESH da página
+    let isPageReload = false;
+    try {
+      const navEntries = performance.getEntriesByType('navigation');
+      if (navEntries && navEntries.length > 0) {
+        isPageReload = (navEntries[0] as PerformanceNavigationTiming).type === 'reload';
+      } else if ((performance as any).navigation) {
+        isPageReload = (performance as any).navigation.type === 1; // TYPE_RELOAD
+      }
+    } catch {}
+
+    const sessionTab = sessionStorage.getItem('app_session_current_tab');
+
+    // Se for REFRESH da página: permanece na página em que o usuário estava
+    if (isPageReload) {
+      const hash = window.location.hash.toLowerCase();
+      if (
+        hash.includes('cotacoes') ||
+        hash.includes('disputa') ||
+        hash.includes('pedidos') ||
+        hash.includes('listas') ||
+        hash.includes('cotar')
+      ) {
+        return 'cotacoes';
+      }
+      if (sessionTab === 'cotacoes' || sessionTab === 'lista') {
+        return sessionTab as 'lista' | 'cotacoes';
+      }
+      const saved = getLocal<string>(STORAGE_KEYS.CURRENT_TAB, '');
+      if (saved === 'cotacoes' || saved === 'lista') {
+        return saved as 'lista' | 'cotacoes';
+      }
+    }
+
+    // Ao ABRIR o aplicativo pela primeira vez / nova sessão / atalho / nova aba: SEMPRE abre na tela LISTA
+    try {
+      sessionStorage.setItem('app_session_current_tab', 'lista');
+      setLocal(STORAGE_KEYS.CURRENT_TAB, 'lista');
+      if (window.location.hash && window.location.hash !== '#lista') {
+        history.replaceState(null, '', window.location.pathname + window.location.search + '#lista');
+      }
+    } catch {}
+
+    return 'lista';
+  });
+
+  const handleSelectTab = (tab: 'lista' | 'cotacoes') => {
+    setCurrentTab(tab);
+    setLocal(STORAGE_KEYS.CURRENT_TAB, tab);
+    try {
+      sessionStorage.setItem('app_session_current_tab', tab);
+    } catch {}
+    if (typeof window !== 'undefined') {
+      if (tab === 'cotacoes') {
+        const subTab = getLocal<string>(STORAGE_KEYS.QUOTES_SUBTAB, 'disputa');
+        window.location.hash = `#cotacoes/${subTab}`;
+      } else {
+        window.location.hash = '#lista';
+      }
+    }
+  };
+
   const [principalListId, setPrincipalListId] = useState<string>(() =>
     getLocal<string>(STORAGE_KEYS.PRINCIPAL_LIST, '')
   );
-  const [activeListId, setActiveListId] = useState<string>(() =>
-    getLocal<string>(STORAGE_KEYS.PRINCIPAL_LIST, '')
-  );
+  const [activeListId, setActiveListId] = useState<string>(() => {
+    const savedActive = getLocal<string>(STORAGE_KEYS.ACTIVE_LIST, '');
+    if (savedActive) return savedActive;
+    return getLocal<string>(STORAGE_KEYS.PRINCIPAL_LIST, '');
+  });
+
+  const handleSelectActiveList = (id: string) => {
+    setActiveListId(id);
+    setLocal(STORAGE_KEYS.ACTIVE_LIST, id);
+  };
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [selectedPriority, setSelectedPriority] = useState<Priority | 'total'>('total');
   const [selectedUserId, setSelectedUserId] = useState<string | 'todos'>('todos');
@@ -159,6 +234,7 @@ export default function App() {
   const [isMainBarcodeScannerOpen, setIsMainBarcodeScannerOpen] = useState(false);
   const [isClearCacheOpen, setIsClearCacheOpen] = useState(false);
   const [purchaseToastMessage, setPurchaseToastMessage] = useState<string | null>(null);
+  const [userSwitchToast, setUserSwitchToast] = useState<string | null>(null);
 
   const handleOpenEditUser = (user: UserProfile) => {
     setAdminInitialTab('usuarios');
@@ -203,6 +279,10 @@ export default function App() {
 
           setActiveListId((prev) => {
             if (prev && data.some((l) => l.id === prev)) return prev;
+            const storedActive = getLocal<string>(STORAGE_KEYS.ACTIVE_LIST, '');
+            if (storedActive && data.some((l) => l.id === storedActive)) {
+              return storedActive;
+            }
             if (effectivePrincipalId && data.some((l) => l.id === effectivePrincipalId)) {
               return effectivePrincipalId;
             }
@@ -213,12 +293,11 @@ export default function App() {
       }
     );
 
-    const unsubProducts = subscribeToCollection<ProductItem>(
-      'products',
-      STORAGE_KEYS.PRODUCTS,
-      INITIAL_PRODUCTS,
-      setProducts
-    );
+    // Ouvinte em Tempo Real (onSnapshot) do Firestore para Produtos e Totais instantâneos
+    const unsubProducts = subscribeToProducts((liveProducts, stats) => {
+      setProducts(liveProducts);
+      setProductStats(stats);
+    });
 
     const unsubSuppliers = subscribeToCollection<Supplier>(
       'suppliers',
@@ -248,52 +327,139 @@ export default function App() {
       setCatalog
     );
 
-    // Sync with backend server if available
+    const unsubDisputes = subscribeToCollection<any>(
+      'dispute_selections',
+      STORAGE_KEYS.DISPUTE_SELECTIONS,
+      [],
+      (disputes) => {
+        if (Array.isArray(disputes) && disputes.length > 0) {
+          const currentManual = getLocal<Record<string, any>>(STORAGE_KEYS.MANUAL_WINNERS, {});
+          let changed = false;
+          disputes.forEach((sel) => {
+            if (sel && sel.productId) {
+              if (sel.ativo && sel.fornecedorEscolhidoId) {
+                if (
+                  !currentManual[sel.productId] ||
+                  currentManual[sel.productId].supplierId !== sel.fornecedorEscolhidoId
+                ) {
+                  currentManual[sel.productId] = {
+                    supplierId: sel.fornecedorEscolhidoId,
+                    supplierName: sel.fornecedorEscolhidoNome || '',
+                    price: sel.precoNoMomento || 0,
+                    isManualSelection: true,
+                    timestamp: sel.escolhidoEm || '',
+                    user: sel.escolhidoPor || { id: 'admin', nome: 'Administrador' },
+                  };
+                  changed = true;
+                }
+              } else if (sel.ativo === false && currentManual[sel.productId]) {
+                delete currentManual[sel.productId];
+                changed = true;
+              }
+            }
+          });
+          if (changed) {
+            setLocal(STORAGE_KEYS.MANUAL_WINNERS, currentManual);
+            setProducts((prev) =>
+              prev.map((p) => {
+                const manual = currentManual[p.id];
+                if (manual && manual.isManualSelection) {
+                  return {
+                    ...p,
+                    fornecedorEscolhidoId: manual.supplierId,
+                    fornecedorEscolhidoNome: manual.supplierName || p.fornecedorEscolhidoNome || '',
+                    isManualSelection: true,
+                    manualSelectionPrice: manual.price ?? p.manualSelectionPrice,
+                    manualSelectionTimestamp: manual.timestamp || p.manualSelectionTimestamp,
+                    manualSelectionUser: manual.user || p.manualSelectionUser,
+                  };
+                } else if (!manual && p.isManualSelection) {
+                  return {
+                    ...p,
+                    fornecedorEscolhidoId: '',
+                    fornecedorEscolhidoNome: '',
+                    isManualSelection: false,
+                    manualSelectionPrice: undefined,
+                    manualSelectionTimestamp: undefined,
+                    manualSelectionUser: undefined,
+                  };
+                }
+                return p;
+              })
+            );
+          }
+        }
+      }
+    );
+
+    // Bootstrap inicial do servidor local caso o Firestore ainda não tenha retornado dados
     fetch('/api/data')
       .then((res) => (res.ok ? res.json() : null))
       .then((serverDb) => {
         if (serverDb) {
-          if (Array.isArray(serverDb.lists) && serverDb.lists.length > 0) {
-            setLists((prev) => {
-              const map = new Map(prev.map((i) => [i.id, i]));
-              serverDb.lists.forEach((i: PurchaseList) => map.set(i.id, i));
-              return Array.from(map.values());
+          if (Array.isArray(serverDb.dispute_selections) && serverDb.dispute_selections.length > 0) {
+            const currentManual = getLocal<Record<string, any>>(STORAGE_KEYS.MANUAL_WINNERS, {});
+            let changed = false;
+            serverDb.dispute_selections.forEach((sel: any) => {
+              if (sel && sel.productId && sel.ativo && sel.fornecedorEscolhidoId) {
+                if (!currentManual[sel.productId]) {
+                  currentManual[sel.productId] = {
+                    supplierId: sel.fornecedorEscolhidoId,
+                    supplierName: sel.fornecedorEscolhidoNome || '',
+                    price: sel.precoNoMomento || 0,
+                    isManualSelection: true,
+                    timestamp: sel.escolhidoEm || '',
+                    user: sel.escolhidoPor || { id: 'admin', nome: 'Administrador' },
+                  };
+                  changed = true;
+                }
+              }
             });
+            if (changed) setLocal(STORAGE_KEYS.MANUAL_WINNERS, currentManual);
+          }
+          if (Array.isArray(serverDb.lists) && serverDb.lists.length > 0) {
+            setLists((prev) => (prev.length === 0 ? serverDb.lists : prev));
           }
           if (Array.isArray(serverDb.suppliers) && serverDb.suppliers.length > 0) {
-            setSuppliers((prev) => {
-              const map = new Map(prev.map((i) => [i.id, i]));
-              serverDb.suppliers.forEach((i: Supplier) => map.set(i.id, i));
-              return Array.from(map.values());
-            });
+            setSuppliers((prev) => (prev.length === 0 ? serverDb.suppliers : prev));
           }
           if (Array.isArray(serverDb.products) && serverDb.products.length > 0) {
-            setProducts((prev) => {
-              const map = new Map(prev.map((i) => [i.id, i]));
-              serverDb.products.forEach((i: ProductItem) => map.set(i.id, i));
-              return Array.from(map.values());
+            const manualWinnersMap = getLocal<Record<string, any>>(STORAGE_KEYS.MANUAL_WINNERS, {});
+            const mergedProducts = serverDb.products.map((p: ProductItem) => {
+              const manual = manualWinnersMap[p.id];
+              if (manual && manual.isManualSelection) {
+                return {
+                  ...p,
+                  fornecedorEscolhidoId: manual.supplierId,
+                  fornecedorEscolhidoNome: manual.supplierName || p.fornecedorEscolhidoNome || '',
+                  isManualSelection: true,
+                  manualSelectionPrice: manual.price ?? p.manualSelectionPrice,
+                  manualSelectionTimestamp: manual.timestamp || p.manualSelectionTimestamp,
+                  manualSelectionUser: manual.user || p.manualSelectionUser,
+                };
+              }
+              return p;
             });
+            setProducts((prev) => (prev.length === 0 ? mergedProducts : prev));
           }
           if (Array.isArray(serverDb.quotes) && serverDb.quotes.length > 0) {
-            setQuotes((prev) => {
-              const map = new Map(prev.map((i) => [i.id, i]));
-              serverDb.quotes.forEach((i: SupplierQuote) => map.set(i.id, i));
-              return Array.from(map.values());
-            });
+            setQuotes((prev) => (prev.length === 0 ? serverDb.quotes : prev));
           }
           if (Array.isArray(serverDb.users) && serverDb.users.length > 0) {
             setUsers((prev) => {
-              const map = new Map(prev.map((i) => [i.id, i]));
-              serverDb.users.forEach((i: UserProfile) => map.set(i.id, i));
-              return Array.from(map.values());
+              const map = new Map(prev.map((u) => [u.id, u]));
+              serverDb.users.forEach((u: UserProfile) => {
+                if (!map.has(u.id)) {
+                  map.set(u.id, u);
+                }
+              });
+              const merged = Array.from(map.values());
+              setLocal(STORAGE_KEYS.USERS, merged);
+              return merged;
             });
           }
           if (Array.isArray(serverDb.catalog) && serverDb.catalog.length > 0) {
-            setCatalog((prev) => {
-              const map = new Map(prev.map((i) => [i.id, i]));
-              serverDb.catalog.forEach((i: CatalogProduct) => map.set(i.id, i));
-              return Array.from(map.values());
-            });
+            setCatalog((prev) => (prev.length === 0 ? serverDb.catalog : prev));
           }
         }
       })
@@ -306,6 +472,7 @@ export default function App() {
       unsubQuotes();
       unsubUsers();
       unsubCatalog();
+      unsubDisputes();
     };
   }, []);
 
@@ -330,9 +497,10 @@ export default function App() {
                 map.set(sq.id, sq);
               }
             });
-            return Array.from(map.values());
+            const merged = Array.from(map.values());
+            setLocal(STORAGE_KEYS.QUOTES, merged);
+            return merged;
           });
-          setLocal(STORAGE_KEYS.QUOTES, serverDb.quotes);
         }
       }
     } catch (e) {
@@ -369,20 +537,25 @@ export default function App() {
       };
     }
 
-    const onFocus = () => handleRefreshQuotes();
+    const onFocus = () => {
+      if (currentTab !== 'cotacoes') {
+        handleRefreshQuotes();
+      }
+    };
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'visible' && currentTab !== 'cotacoes') {
         handleRefreshQuotes();
       }
     };
     window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onVisibilityChange);
 
+    // Quando o usuário está em Cotações / Disputa, não fazemos polling automático para não resetar ou piscar a tela
     const interval = setInterval(() => {
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'visible' && currentTab !== 'cotacoes') {
         handleRefreshQuotes();
       }
-    }, 4000);
+    }, 15000);
 
     return () => {
       if (channel) channel.close();
@@ -390,7 +563,43 @@ export default function App() {
       document.removeEventListener('visibilitychange', onVisibilityChange);
       clearInterval(interval);
     };
-  }, [handleRefreshQuotes]);
+  }, [handleRefreshQuotes, currentTab]);
+
+  // Keep-alive heartbeat: pinga o servidor a cada 60s para evitar que o Cloud Run hiberne ou feche conexões ociosas a cada 10-15 minutos
+  useEffect(() => {
+    const keepAlive = setInterval(() => {
+      fetch('/api/health').catch(() => {});
+    }, 60000);
+    return () => clearInterval(keepAlive);
+  }, []);
+
+  // Sincronização do hash da URL com a aba ativa
+  useEffect(() => {
+    const handleHashChange = () => {
+      const hash = window.location.hash.toLowerCase();
+      if (
+        hash.includes('cotacoes') ||
+        hash.includes('disputa') ||
+        hash.includes('pedidos') ||
+        hash.includes('listas') ||
+        hash.includes('cotar')
+      ) {
+        setCurrentTab('cotacoes');
+        setLocal(STORAGE_KEYS.CURRENT_TAB, 'cotacoes');
+        try {
+          sessionStorage.setItem('app_session_current_tab', 'cotacoes');
+        } catch {}
+      } else if (hash.includes('lista')) {
+        setCurrentTab('lista');
+        setLocal(STORAGE_KEYS.CURRENT_TAB, 'lista');
+        try {
+          sessionStorage.setItem('app_session_current_tab', 'lista');
+        } catch {}
+      }
+    };
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, []);
 
   // Auto-heal missing product photos from catalog or other products
   useEffect(() => {
@@ -409,12 +618,12 @@ export default function App() {
 
     if (hasChanges) {
       setProducts(updated);
-      products.forEach((oldP, idx) => {
-        const newP = updated[idx];
-        if (!oldP.fotoUrl && newP.fotoUrl) {
-          saveDocument('products', STORAGE_KEYS.PRODUCTS, newP).catch(() => {});
-        }
-      });
+      setLocal(STORAGE_KEYS.PRODUCTS, updated);
+      fetch('/api/sync-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ collectionName: 'products', items: updated }),
+      }).catch(() => {});
     }
   }, [catalog, products.length]);
 
@@ -481,7 +690,7 @@ export default function App() {
             });
             saveDocument('suppliers', STORAGE_KEYS.SUPPLIERS, supplierFromPayload);
             saveDocument('lists', STORAGE_KEYS.LISTS, listFromPayload);
-            productsFromPayload.forEach((p) => saveDocument('products', STORAGE_KEYS.PRODUCTS, p));
+            setLocal(STORAGE_KEYS.PRODUCTS, productsFromPayload);
 
             if (isMounted) {
               setPortalResolved({
@@ -622,16 +831,24 @@ export default function App() {
     };
   }, [portalInfo, suppliers, lists, products, retryAttempt]);
 
-  // Firebase Authentication State Listener
+  // Firebase Authentication State Listener: inicializa sessão com Firebase Auth sem sobrescrever colaborador ativo
   useEffect(() => {
     const unsubAuth = onAuthStateChanged(auth, async (fUser) => {
       setFirebaseUser(fUser);
       setAuthLoading(false);
 
       if (fUser) {
+        // 1. Se já existe um colaborador ativo selecionado pelo usuário (ex: Ernon, Sandro, Luciano ou Anacleto),
+        // PRESERVA essa escolha e NUNCA a sobrescreve compulsoriamente com o e-mail master do Firebase
+        const savedActive = getLocal<UserProfile | null>(STORAGE_KEYS.ACTIVE_USER, null);
+        if (savedActive && savedActive.id) {
+          setCurrentUser(savedActive);
+          return;
+        }
+
         let matchedProfile: UserProfile | null = null;
 
-        // 1. Consulta o Firestore diretamente para carregar o perfil mais recente e evitar sobrescrita
+        // 2. Consulta o Firestore para carregar perfil cadastrado correspondente ao login
         try {
           const userDoc = await getDoc(doc(db, 'users', fUser.uid));
           if (userDoc.exists()) {
@@ -639,9 +856,10 @@ export default function App() {
           }
         } catch {}
 
-        // 2. Procura na lista carregada em memória
+        // 3. Procura na lista local de usuários
         if (!matchedProfile) {
-          const inUsers = users.find(
+          const localUsers = getLocal<UserProfile[]>(STORAGE_KEYS.USERS, []);
+          const inUsers = localUsers.find(
             (u) =>
               u.id === fUser.uid ||
               (u.email && fUser.email && u.email.toLowerCase() === fUser.email.toLowerCase()) ||
@@ -653,35 +871,16 @@ export default function App() {
           }
         }
 
-        // 3. Procura no active_user local salvo
-        if (!matchedProfile) {
-          const localActive = getLocal<UserProfile | null>(STORAGE_KEYS.ACTIVE_USER, null);
-          if (
-            localActive &&
-            (localActive.id === fUser.uid ||
-              (localActive.email &&
-                fUser.email &&
-                localActive.email.toLowerCase() === fUser.email.toLowerCase()) ||
-              (fUser.email?.toLowerCase() === 'depositoodelot2@gmail.com' &&
-                (localActive.role === 'admin' ||
-                  (localActive.cargo && localActive.cargo.toLowerCase().includes('admin')))))
-          ) {
-            matchedProfile = localActive;
-          }
-        }
-
         if (matchedProfile) {
-          // Mantém as edições feitas (como o nome "Anacleto") e preserva os dados do usuário
           const finalProfile: UserProfile = {
             ...matchedProfile,
-            id: fUser.uid,
-            email: fUser.email || matchedProfile.email,
+            id: matchedProfile.id || fUser.uid,
+            email: matchedProfile.email || fUser.email || '',
           };
           setCurrentUser(finalProfile);
           setLocal(STORAGE_KEYS.ACTIVE_USER, finalProfile);
-          saveDocument('users', STORAGE_KEYS.USERS, finalProfile);
         } else {
-          // Novo usuário criado apenas se nenhum perfil existente for encontrado
+          // Novo perfil criado como fallback apenas se não houver nenhum perfil correspondente
           const isOwner = fUser.email?.toLowerCase() === 'depositoodelot2@gmail.com';
           const newProfile: UserProfile = {
             id: fUser.uid,
@@ -704,34 +903,18 @@ export default function App() {
     });
 
     return () => unsubAuth();
-  }, [users]);
+  }, []); // Executa apenas no carregamento da aplicação para não reiniciar a cada mudança na lista de usuários
 
-  // Sincronização em tempo real do perfil do usuário ativo com o Firestore entre dispositivos
+  // Sincronização em tempo real do perfil do colaborador ativo quando ele é editado
   useEffect(() => {
     if (!currentUser || users.length === 0) return;
 
-    // 1. Busca por ID exato
+    // Busca o usuário correspondente no banco
     let remoteUser = users.find((u) => u.id === currentUser.id);
-
-    // 2. Busca por e-mail
     if (!remoteUser && currentUser.email) {
       remoteUser = users.find(
         (u) => u.email && u.email.toLowerCase() === currentUser.email.toLowerCase()
       );
-    }
-
-    // 3. Busca pelo perfil de admin se o usuário atual for admin
-    if (
-      !remoteUser &&
-      (currentUser.role === 'admin' ||
-        (currentUser.cargo && currentUser.cargo.toLowerCase().includes('admin')))
-    ) {
-      const adminUsers = users.filter(
-        (u) => u.role === 'admin' || (u.cargo && u.cargo.toLowerCase().includes('admin'))
-      );
-      if (adminUsers.length > 0) {
-        remoteUser = adminUsers[0];
-      }
     }
 
     if (remoteUser) {
@@ -745,10 +928,8 @@ export default function App() {
         remoteUser.ativo !== currentUser.ativo;
 
       if (hasChanged) {
-        const updated = {
-          ...currentUser,
+        const updated: UserProfile = {
           ...remoteUser,
-          id: currentUser.id, // Preserva o uid da sessão
         };
         setCurrentUser(updated);
         setLocal(STORAGE_KEYS.ACTIVE_USER, updated);
@@ -1023,13 +1204,134 @@ export default function App() {
     setProducts((prev) => prev.filter((p) => p.id !== id));
   };
 
-  const handleSelectProductWinner = async (productId: string, supplierId: string) => {
+  const handleSelectProductWinner = async (
+    productId: string,
+    supplierId: string,
+    price?: number,
+    supplierName?: string
+  ): Promise<boolean> => {
     const prod = products.find((p) => p.id === productId);
-    if (!prod) return;
-    const isAlreadySelected = prod.fornecedorEscolhidoId === supplierId;
+    if (!prod) return false;
+
+    const user = currentUser || {
+      id: 'admin',
+      nome: 'Administrador',
+    };
+    const now = new Date().toISOString();
+
+    // 1. Atualiza registro no mapa persistente de escolhas manuais para proteção local e sincronização
+    const manualWinners = getLocal<
+      Record<
+        string,
+        {
+          supplierId: string;
+          supplierName?: string;
+          price?: number;
+          isManualSelection: boolean;
+          timestamp: string;
+          user: { id: string; nome: string };
+        }
+      >
+    >(STORAGE_KEYS.MANUAL_WINNERS, {});
+
+    manualWinners[productId] = {
+      supplierId,
+      supplierName: supplierName || '',
+      price: price || 0,
+      isManualSelection: true,
+      timestamp: now,
+      user: { id: user.id, nome: user.nome },
+    };
+    setLocal(STORAGE_KEYS.MANUAL_WINNERS, manualWinners);
+
     const updated: ProductItem = {
       ...prod,
-      fornecedorEscolhidoId: isAlreadySelected ? undefined : supplierId,
+      fornecedorEscolhidoId: supplierId,
+      fornecedorEscolhidoNome: supplierName || '',
+      isManualSelection: true,
+      manualSelectionTimestamp: now,
+      manualSelectionPrice: price,
+      manualSelectionUser: { id: user.id, nome: user.nome },
+    };
+
+    try {
+      // 2. Salva no Firestore 'products' + LocalStorage + backend
+      await saveDocument('products', STORAGE_KEYS.PRODUCTS, updated);
+
+      // 3. Salva também na coleção dedicada 'dispute_selections' no Firestore para auditoria permanente
+      await saveDocument('dispute_selections', 'app_compras_dispute_selections', {
+        id: productId,
+        productId,
+        listaId: prod.listaId,
+        fornecedorEscolhidoId: supplierId,
+        fornecedorEscolhidoNome: supplierName || '',
+        precoNoMomento: price || 0,
+        escolhidoEm: now,
+        escolhidoPor: { id: user.id, nome: user.nome },
+        ativo: true,
+      });
+
+      // 4. Atualiza estado em memória
+      setProducts((prev) => prev.map((p) => (p.id === productId ? updated : p)));
+      return true;
+    } catch (err) {
+      console.error('Erro ao persistir escolha de vencedor no banco:', err);
+      // Reverte cache local caso falhe
+      delete manualWinners[productId];
+      setLocal(STORAGE_KEYS.MANUAL_WINNERS, manualWinners);
+      return false;
+    }
+  };
+
+  const handleUndoProductWinner = async (productId: string): Promise<boolean> => {
+    const prod = products.find((p) => p.id === productId);
+    if (!prod) return false;
+
+    // 1. Remove do mapa local
+    const manualWinners = getLocal<Record<string, any>>(STORAGE_KEYS.MANUAL_WINNERS, {});
+    delete manualWinners[productId];
+    setLocal(STORAGE_KEYS.MANUAL_WINNERS, manualWinners);
+
+    // 2. Prepara produto resetado
+    const updated: ProductItem = {
+      ...prod,
+      fornecedorEscolhidoId: '',
+      fornecedorEscolhidoNome: '',
+      isManualSelection: false,
+      manualSelectionTimestamp: undefined,
+      manualSelectionPrice: undefined,
+      manualSelectionUser: undefined,
+    };
+
+    try {
+      // 3. Salva no Firestore 'products' + LocalStorage + backend
+      await saveDocument('products', STORAGE_KEYS.PRODUCTS, updated);
+
+      // 4. Desativa na coleção 'dispute_selections'
+      await saveDocument('dispute_selections', 'app_compras_dispute_selections', {
+        id: productId,
+        productId,
+        listaId: prod.listaId,
+        fornecedorEscolhidoId: '',
+        escolhidoEm: new Date().toISOString(),
+        ativo: false,
+      });
+
+      // 5. Atualiza estado em memória
+      setProducts((prev) => prev.map((p) => (p.id === productId ? updated : p)));
+      return true;
+    } catch (err) {
+      console.error('Erro ao desfazer escolha manual no banco:', err);
+      return false;
+    }
+  };
+
+  const handleUpdateProductOrderQty = async (productId: string, quantity: number) => {
+    const prod = products.find((p) => p.id === productId);
+    if (!prod) return;
+    const updated: ProductItem = {
+      ...prod,
+      quantidadePedido: Math.max(0, quantity),
     };
     await saveDocument('products', STORAGE_KEYS.PRODUCTS, updated);
     setProducts((prev) => prev.map((p) => (p.id === productId ? updated : p)));
@@ -1159,6 +1461,8 @@ export default function App() {
   const handleSwitchUser = (user: UserProfile) => {
     setCurrentUser(user);
     setLocal(STORAGE_KEYS.ACTIVE_USER, user);
+    setUserSwitchToast(`Conectado como ${user.nome} (${user.cargo || user.role})`);
+    setTimeout(() => setUserSwitchToast(null), 3500);
   };
 
   const handleLogout = async () => {
@@ -1210,6 +1514,8 @@ export default function App() {
   const handleSelectLocalUser = (localUser: UserProfile) => {
     setCurrentUser(localUser);
     setLocal(STORAGE_KEYS.ACTIVE_USER, localUser);
+    setUserSwitchToast(`Conectado como ${localUser.nome} (${localUser.cargo || localUser.role})`);
+    setTimeout(() => setUserSwitchToast(null), 3500);
   };
 
   const handleSaveUser = async (user: UserProfile) => {
@@ -1229,10 +1535,9 @@ export default function App() {
       (currentUser.id === user.id ||
         (currentUser.email &&
           user.email &&
-          currentUser.email.toLowerCase() === user.email.toLowerCase()) ||
-        (currentUser.role === 'admin' && user.role === 'admin'))
+          currentUser.email.toLowerCase() === user.email.toLowerCase()))
     ) {
-      const updated = { ...currentUser, ...user, id: currentUser.id };
+      const updated = { ...currentUser, ...user };
       setCurrentUser(updated);
       setLocal(STORAGE_KEYS.ACTIVE_USER, updated);
     }
@@ -1266,13 +1571,16 @@ export default function App() {
   const handleAddFromCatalog = async (
     item: CatalogProduct,
     quantidade: number = 1,
-    prioridade?: Priority
+    prioridade?: Priority,
+    targetListId?: string
   ) => {
+    const listIdToUse = targetListId || activeList.id;
+    const targetList = lists.find((l) => l.id === listIdToUse) || activeList;
     const newProd: ProductItem = {
       id: `prod-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      listaId: activeList.id,
+      listaId: listIdToUse,
       nome: capitalizeWords(item.nome),
-      marca: item.marcaPadrao || activeList.fabrica,
+      marca: item.marcaPadrao || targetList.fabrica,
       unidade: item.unidadePadrao || 'UN',
       quantidade: quantidade || 1,
       prioridade: prioridade || item.prioridadePadrao || 'fixo',
@@ -1546,7 +1854,7 @@ export default function App() {
             </div>
 
             {/* Scrollable Products List Container - APENAS ESTA ÁREA ROLA */}
-            <div className="flex-1 overflow-y-auto overscroll-contain pb-28 w-full min-w-0">
+            <div className="flex-1 overflow-y-auto overscroll-contain pb-36 sm:pb-40 w-full min-w-0">
               {/* Product Cards or Empty State */}
               {lists.length === 0 ? (
                 <div className="px-4 py-16 text-center flex flex-col items-center justify-center">
@@ -1620,11 +1928,11 @@ export default function App() {
 
         {/* VIEW 2: TAB COTAÇÕES matching Screenshot 3 */}
         {currentTab === 'cotacoes' && (
-          <div className="flex-1 overflow-y-auto overscroll-contain w-full min-w-0 pb-20">
+          <div className="flex-1 flex flex-col min-h-0 w-full overflow-hidden relative">
             <QuotesView
               lists={lists}
               activeListId={activeList?.id || ''}
-              onSelectList={setActiveListId}
+              onSelectList={handleSelectActiveList}
               onManageLists={() => setIsManageListsOpen(true)}
               products={products}
               suppliers={suppliers}
@@ -1632,7 +1940,7 @@ export default function App() {
               catalog={catalog}
               currentUser={currentUser}
               onSaveQuote={handleSaveQuote}
-              onBackToList={() => setCurrentTab('lista')}
+              onBackToList={() => handleSelectTab('lista')}
               onOpenPortalModal={(supplier, list) => {
                 setActivePortalSupplier(supplier);
                 setActivePortalList(list);
@@ -1647,7 +1955,9 @@ export default function App() {
               }}
               onEditSupplier={handleOpenEditSupplier}
               onSelectWinner={handleSelectProductWinner}
+              onUndoWinnerChoice={handleUndoProductWinner}
               onRefreshQuotes={handleRefreshQuotes}
+              onUpdateProductOrderQty={handleUpdateProductOrderQty}
             />
           </div>
         )}
@@ -1655,7 +1965,7 @@ export default function App() {
         {/* Bottom Navigation matching Screenshot 1 & 3 */}
         <BottomNav
           currentTab={currentTab}
-          onSelectTab={setCurrentTab}
+          onSelectTab={handleSelectTab}
           quotesBadgeCount={totalQuotesCount}
         />
 
@@ -1687,7 +1997,7 @@ export default function App() {
             suppliers={suppliers}
             activeListId={activeList?.id || ''}
             principalListId={principalListId}
-            onSelectList={setActiveListId}
+            onSelectList={handleSelectActiveList}
             onSetPrincipalList={handleSetPrincipalList}
             onCreateList={handleCreateList}
             onUpdateList={handleUpdateList}
@@ -1709,7 +2019,7 @@ export default function App() {
           />
         )}
 
-        {/* 4. Modal Gerenciamento & Administração matching Screenshot 2 */}
+        {/* 4. Modal Configurações */}
         {isAdminOpen && (
           <AdminModal
             isOpen={isAdminOpen}
@@ -1727,6 +2037,7 @@ export default function App() {
             onSaveSupplier={handleSaveSupplier}
             onDeleteSupplier={handleDeleteSupplier}
             activeList={activeList}
+            lists={lists}
             products={products}
             catalog={catalog}
             onImportProducts={handleImportProducts}
@@ -1820,6 +2131,14 @@ export default function App() {
           <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-sm w-[92%] bg-slate-900/95 backdrop-blur-md text-white text-xs font-semibold px-4 py-3 rounded-2xl shadow-2xl border border-slate-700 flex items-center gap-2.5 animate-in fade-in slide-in-from-top-3 duration-200">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
             <span className="flex-1 text-slate-100">{purchaseToastMessage}</span>
+          </div>
+        )}
+
+        {/* Notificação Toast de Troca de Usuário */}
+        {userSwitchToast && (
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-sm w-[92%] bg-blue-900/95 backdrop-blur-md text-white text-xs font-semibold px-4 py-3 rounded-2xl shadow-2xl border border-blue-500/40 flex items-center gap-2.5 animate-in fade-in slide-in-from-top-3 duration-200">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="flex-1 text-slate-100">{userSwitchToast}</span>
           </div>
         )}
       </div>

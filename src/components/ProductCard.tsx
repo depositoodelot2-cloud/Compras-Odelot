@@ -40,6 +40,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   users,
 }) => {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [openUpwards, setOpenUpwards] = useState(false);
   const [isPhotoZoomed, setIsPhotoZoomed] = useState(false);
   const [showConfirmInline, setShowConfirmInline] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -63,6 +64,23 @@ export const ProductCard: React.FC<ProductCardProps> = ({
   const creatorInitial = rawInitial.toUpperCase();
   const creatorColor = getUserColorHex(matchedUser?.cor || product.criadoPor?.cor);
 
+  const updateMenuPosition = () => {
+    if (menuRef.current) {
+      const rect = menuRef.current.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      // BottomNav is 64px, menu is ~180-220px. If less than 240px below, open upwards!
+      setOpenUpwards(spaceBelow < 240);
+    }
+  };
+
+  const handleToggleMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!menuOpen) {
+      updateMenuPosition();
+    }
+    setMenuOpen((prev) => !prev);
+  };
+
   // Close menu and inline confirmation on click outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -80,6 +98,22 @@ export const ProductCard: React.FC<ProductCardProps> = ({
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [menuOpen, showConfirmInline]);
+
+  // Keep menu position updated on scroll or resize when open
+  useEffect(() => {
+    if (menuOpen) {
+      updateMenuPosition();
+      const handleScrollOrResize = () => {
+        updateMenuPosition();
+      };
+      window.addEventListener('resize', handleScrollOrResize);
+      window.addEventListener('scroll', handleScrollOrResize, true);
+      return () => {
+        window.removeEventListener('resize', handleScrollOrResize);
+        window.removeEventListener('scroll', handleScrollOrResize, true);
+      };
+    }
+  }, [menuOpen]);
 
   // Priority badge styling matching image.png
   const getPriorityStyle = (prioridade: Priority) => {
@@ -121,7 +155,9 @@ export const ProductCard: React.FC<ProductCardProps> = ({
         isPurchased
           ? 'bg-slate-50/75 border-slate-200 opacity-80'
           : 'border-slate-200/90 hover:border-blue-300'
-      } ${isSelected || showConfirmInline ? 'ring-2 ring-emerald-500/70 border-emerald-500' : ''}`}
+      } ${isSelected || showConfirmInline ? 'ring-2 ring-emerald-500/70 border-emerald-500' : ''} ${
+        menuOpen ? 'z-30' : 'z-0'
+      }`}
     >
       {/* 1. Left Checkbox + Botão de confirmação na frente */}
       <div className="flex items-center gap-2 shrink-0">
@@ -264,7 +300,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
       <div className="relative shrink-0" ref={menuRef}>
         <button
           type="button"
-          onClick={() => setMenuOpen(!menuOpen)}
+          onClick={handleToggleMenu}
           className="w-7 h-7 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
           title="Opções do produto"
         >
@@ -273,7 +309,13 @@ export const ProductCard: React.FC<ProductCardProps> = ({
 
         {/* Dropdown Action Menu */}
         {menuOpen && (
-          <div className="absolute right-0 top-8 z-30 w-48 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 animate-in fade-in zoom-in-95 duration-150">
+          <div
+            className={`absolute right-0 z-50 w-52 bg-white rounded-xl shadow-2xl border border-slate-200 py-1.5 animate-in fade-in zoom-in-95 duration-150 max-h-[min(320px,75vh)] overflow-y-auto ${
+              openUpwards
+                ? 'bottom-full mb-1.5 origin-bottom-right'
+                : 'top-full mt-1.5 origin-top-right'
+            }`}
+          >
             <button
               type="button"
               onClick={() => {
@@ -303,7 +345,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
             </button>
 
             {product.observacao && (
-              <div className="px-3 py-1.5 border-t border-slate-100 text-[10px] text-slate-500 italic">
+              <div className="px-3 py-1.5 border-t border-slate-100 text-[10px] text-slate-500 italic max-h-16 overflow-y-auto break-words">
                 "{product.observacao}"
               </div>
             )}

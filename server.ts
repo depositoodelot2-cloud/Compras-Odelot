@@ -25,6 +25,7 @@ interface DatabaseSchema {
   quotes: any[];
   users: any[];
   catalog: any[];
+  dispute_selections: any[];
 }
 
 const INITIAL_DB: DatabaseSchema = {
@@ -34,6 +35,7 @@ const INITIAL_DB: DatabaseSchema = {
   quotes: [],
   users: [],
   catalog: [],
+  dispute_selections: [],
 };
 
 // In-Memory Database initialized from file or default
@@ -43,6 +45,9 @@ if (fs.existsSync(DB_FILE)) {
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
     dbState = { ...INITIAL_DB, ...JSON.parse(raw) };
+    if (!Array.isArray(dbState.dispute_selections)) {
+      dbState.dispute_selections = [];
+    }
   } catch (err) {
     console.warn('Error reading database.json, using defaults:', err);
   }
@@ -148,6 +153,23 @@ app.post('/api/sync', (req: Request, res: Response) => {
 
   persistDb();
   res.json({ success: true, count: dbState[collectionName as keyof DatabaseSchema].length });
+});
+
+// Sync batch items to reduce requests
+app.post('/api/sync-batch', (req: Request, res: Response) => {
+  const { collectionName, items } = req.body;
+  if (!collectionName || !(collectionName in dbState) || !Array.isArray(items)) {
+    return res.status(400).json({ error: 'Dados inválidos' });
+  }
+
+  const list = dbState[collectionName as keyof DatabaseSchema] as any[];
+  const map = new Map(list.map((x: any) => [x.id, x]));
+  items.forEach((item: any) => {
+    if (item && item.id) map.set(item.id, item);
+  });
+  dbState[collectionName as keyof DatabaseSchema] = Array.from(map.values()) as any;
+  persistDb();
+  res.json({ success: true, count: items.length });
 });
 
 // Clear cache and reset products endpoint
@@ -349,7 +371,12 @@ async function startServer() {
 
   if (!isProd) {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        watch: {
+          ignored: ['**/data/**', '**/database.json', '**/.git/**'],
+        },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

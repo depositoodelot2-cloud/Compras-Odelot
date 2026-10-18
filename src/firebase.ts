@@ -74,11 +74,17 @@ export async function registerWithEmail(
     ativo: true,
   };
 
-  // Salva no Firestore
-  try {
-    await setDoc(doc(db, 'users', user.uid), profile, { merge: true });
-  } catch (e) {
-    console.error('Erro ao gravar perfil no Firestore:', e);
+  // Salva no Firestore se a cota permitir
+  if (!isFirestoreQuotaExhausted) {
+    try {
+      await setDoc(doc(db, 'users', user.uid), profile, { merge: true });
+    } catch (e: any) {
+      if (e?.code === 'resource-exhausted' || (e?.message && e.message.toLowerCase().includes('quota'))) {
+        markFirestoreQuotaExhausted();
+      } else {
+        console.warn('Erro ao gravar perfil no Firestore:', e);
+      }
+    }
   }
 
   // Salva no servidor backend local
@@ -119,23 +125,37 @@ export const db = initializeFirestore(
   firestoreDbId
 );
 
-// Enable persistence if possible
-try {
-  enableIndexedDbPersistence(db).catch(() => {
-    // Already active or unsupported tab, ignore
-  });
-} catch {
-  // Ignore
+// Estado de controle de cota do Firestore para proteção temporária em tempo de execução
+let isFirestoreQuotaExhausted = false;
+
+export function markFirestoreQuotaExhausted() {
+  if (isFirestoreQuotaExhausted) return;
+  isFirestoreQuotaExhausted = true;
+  console.info('[Firestore] Cota gratuita temporariamente excedida no banco nomeado. O aplicativo mantém sincronização com o servidor local backend.');
+}
+
+export function resetFirestoreQuotaExhausted() {
+  isFirestoreQuotaExhausted = false;
+  try {
+    sessionStorage.removeItem('firestore_quota_exhausted_until');
+  } catch {}
+}
+
+export function isQuotaExhausted(): boolean {
+  return isFirestoreQuotaExhausted;
 }
 
 // Test connection to Firestore on boot
 async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
+    resetFirestoreQuotaExhausted();
     console.info(`Conexão com Firebase Firestore [${firestoreDbId || 'default'}] estabelecida com sucesso!`);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn("Please check your Firebase configuration.");
+  } catch (error: any) {
+    if (error?.code === 'resource-exhausted' || (error?.message && error.message.toLowerCase().includes('quota'))) {
+      markFirestoreQuotaExhausted();
+    } else if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.warn("Firebase operando em modo offline.");
     }
   }
 }
@@ -159,6 +179,12 @@ const STORAGE_KEYS = {
   ACTIVE_USER: 'app_compras_active_user',
   CATALOG: 'app_compras_catalog',
   PRINCIPAL_LIST: 'app_compras_principal_list_id',
+  ACTIVE_LIST: 'app_compras_active_list_id',
+  CURRENT_TAB: 'app_compras_current_tab',
+  QUOTES_SUBTAB: 'app_compras_quotes_subtab',
+  ORDER_QUANTITIES: 'app_compras_order_quantities',
+  MANUAL_WINNERS: 'app_compras_manual_winners',
+  DISPUTE_SELECTIONS: 'app_compras_dispute_selections',
 };
 
 // Helper to strip heavy base64 images from items when saving to limited localStorage (Firestore retains the full image)
@@ -229,38 +255,33 @@ export function setLocal<T>(key: string, val: T): void {
 }
 
 const DATA_VERSION_KEY = 'app_compras_clean_version';
-const CURRENT_DATA_VERSION = '2026_09_26_prod_clean';
+const CURRENT_DATA_VERSION = '2026_10_15_v1';
 
-// Inicializar armazenamento local com dados iniciais se vazio e limpar excessos de cota
+// Inicializar armazenamento local com dados iniciais se vazio sem apagar a sessão do usuário
 export function initializeStorage() {
   if (typeof window !== 'undefined') {
-    if (localStorage.getItem(DATA_VERSION_KEY) !== CURRENT_DATA_VERSION) {
-      localStorage.clear();
-      localStorage.setItem(DATA_VERSION_KEY, CURRENT_DATA_VERSION);
-    } else {
-      // Clean oversized base64 cached items if present to prevent quota overflow
-      try {
-        const productCache = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
-        if (productCache && productCache.length > 500000) {
-          const parsed = JSON.parse(productCache);
-          if (Array.isArray(parsed)) {
-            const sanitized = parsed.map(sanitizeItemForLocalStorage);
-            localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(sanitized));
-          }
+    // Clean oversized base64 cached items if present to prevent quota overflow
+    try {
+      const productCache = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
+      if (productCache && productCache.length > 500000) {
+        const parsed = JSON.parse(productCache);
+        if (Array.isArray(parsed)) {
+          const sanitized = parsed.map(sanitizeItemForLocalStorage);
+          localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(sanitized));
         }
-      } catch {}
+      }
+    } catch {}
 
-      try {
-        const catalogCache = localStorage.getItem(STORAGE_KEYS.CATALOG);
-        if (catalogCache && catalogCache.length > 500000) {
-          const parsed = JSON.parse(catalogCache);
-          if (Array.isArray(parsed)) {
-            const sanitized = parsed.map(sanitizeItemForLocalStorage);
-            localStorage.setItem(STORAGE_KEYS.CATALOG, JSON.stringify(sanitized));
-          }
+    try {
+      const catalogCache = localStorage.getItem(STORAGE_KEYS.CATALOG);
+      if (catalogCache && catalogCache.length > 500000) {
+        const parsed = JSON.parse(catalogCache);
+        if (Array.isArray(parsed)) {
+          const sanitized = parsed.map(sanitizeItemForLocalStorage);
+          localStorage.setItem(STORAGE_KEYS.CATALOG, JSON.stringify(sanitized));
         }
-      } catch {}
-    }
+      }
+    } catch {}
   }
 
   if (!localStorage.getItem(STORAGE_KEYS.LISTS)) {
@@ -283,7 +304,150 @@ export function initializeStorage() {
   }
 }
 
-// Sincronização em tempo real com Firestore + Fallback reativo instantâneo
+export interface ProductStats {
+  total: number;
+  pendentes: number;
+  comprados: number;
+  porLista: Record<string, { total: number; pendentes: number; comprados: number }>;
+}
+
+export function calculateProductStats(products: ProductItem[]): ProductStats {
+  const stats: ProductStats = {
+    total: products.length,
+    pendentes: 0,
+    comprados: 0,
+    porLista: {},
+  };
+
+  products.forEach((p) => {
+    const isComprado = p.status === 'comprado';
+    if (isComprado) {
+      stats.comprados++;
+    } else {
+      stats.pendentes++;
+    }
+
+    const listaId = p.listaId || 'sem_lista';
+    if (!stats.porLista[listaId]) {
+      stats.porLista[listaId] = { total: 0, pendentes: 0, comprados: 0 };
+    }
+    stats.porLista[listaId].total++;
+    if (isComprado) {
+      stats.porLista[listaId].comprados++;
+    } else {
+      stats.porLista[listaId].pendentes++;
+    }
+  });
+
+  return stats;
+}
+
+/**
+ * Ouvinte em Tempo Real (onSnapshot) do Firestore para Produtos e Cálculo de Totais.
+ * Sincroniza ativamente qualquer alteração (adição, edição, compra, exclusão) instantaneamente
+ * em todas as telas e celulares sem precisar reiniciar o aplicativo.
+ */
+export function subscribeToProducts(
+  onUpdate: (products: ProductItem[], stats: ProductStats) => void
+): () => void {
+  // 1. Notifica inicialmente com o cache local para carregamento instantâneo
+  const cachedProducts = getLocal<ProductItem[]>(STORAGE_KEYS.PRODUCTS, []);
+  if (cachedProducts && cachedProducts.length > 0) {
+    onUpdate(cachedProducts, calculateProductStats(cachedProducts));
+  }
+
+  let unsubscribeFirestore = () => {};
+
+  // 2. Conecta o ouvinte onSnapshot diretamente à coleção 'products' do Firestore
+  try {
+    const colRef = collection(db, 'products');
+    unsubscribeFirestore = onSnapshot(
+      colRef,
+      (snapshot) => {
+        // Mapeia os documentos reais do snapshot do Firestore preservando escolhas manuais ativas
+        const manualWinnersMap = getLocal<
+          Record<
+            string,
+            {
+              supplierId: string;
+              supplierName?: string;
+              price?: number;
+              isManualSelection: boolean;
+              timestamp?: string;
+              user?: { id: string; nome: string };
+            }
+          >
+        >(STORAGE_KEYS.MANUAL_WINNERS, {});
+
+        const liveProducts = snapshot.docs.map((docSnap) => {
+          const data = docSnap.data() as ProductItem;
+          const manual = manualWinnersMap[docSnap.id];
+          if (manual && manual.isManualSelection) {
+            return {
+              ...data,
+              id: docSnap.id,
+              fornecedorEscolhidoId: manual.supplierId,
+              fornecedorEscolhidoNome: manual.supplierName || data.fornecedorEscolhidoNome || '',
+              isManualSelection: true,
+              manualSelectionPrice: manual.price ?? data.manualSelectionPrice,
+              manualSelectionTimestamp: manual.timestamp || data.manualSelectionTimestamp,
+              manualSelectionUser: manual.user || data.manualSelectionUser,
+            };
+          }
+          return {
+            ...data,
+            id: docSnap.id,
+          };
+        }) as ProductItem[];
+
+        // Atualiza o cache local fielmente sem misturar dados fantasmas ou deletados
+        setLocal(STORAGE_KEYS.PRODUCTS, liveProducts);
+
+        // Calcula os totais em tempo real diretamente dos dados do Firestore
+        const stats = calculateProductStats(liveProducts);
+
+        // Notifica a aplicação e recalcula todas as contagens instantaneamente
+        onUpdate(liveProducts, stats);
+      },
+      (error: any) => {
+        console.warn('[Firestore] Ouvinte onSnapshot de produtos:', error?.message || error);
+      }
+    );
+  } catch (err) {
+    console.warn('[Firestore] Erro ao iniciar listener onSnapshot de produtos:', err);
+  }
+
+  // Ouvinte entre abas do mesmo navegador para sincronização imediata
+  const handleStorageChange = (e: StorageEvent) => {
+    if (e.key === STORAGE_KEYS.PRODUCTS && e.newValue) {
+      try {
+        const parsed = JSON.parse(e.newValue);
+        if (Array.isArray(parsed)) {
+          onUpdate(parsed, calculateProductStats(parsed));
+        }
+      } catch {}
+    }
+  };
+  window.addEventListener('storage', handleStorageChange);
+
+  // Também escuta eventos customizados disparados na mesma janela
+  const handleCustomSync = (e: any) => {
+    if (e.detail && Array.isArray(e.detail)) {
+      onUpdate(e.detail, calculateProductStats(e.detail));
+    }
+  };
+  window.addEventListener(`sync_${STORAGE_KEYS.PRODUCTS}`, handleCustomSync);
+
+  return () => {
+    try {
+      unsubscribeFirestore();
+    } catch {}
+    window.removeEventListener('storage', handleStorageChange);
+    window.removeEventListener(`sync_${STORAGE_KEYS.PRODUCTS}`, handleCustomSync);
+  };
+}
+
+// Sincronização em tempo real com Firestore para qualquer coleção
 export function subscribeToCollection<T extends { id: string }>(
   collectionName: string,
   storageKey: string,
@@ -301,37 +465,30 @@ export function subscribeToCollection<T extends { id: string }>(
     unsubscribeFirestore = onSnapshot(
       colRef,
       (snapshot) => {
-        if (!snapshot.empty) {
-          const remoteData = snapshot.docs.map((doc) => ({
-            id: doc.id,
-            ...doc.data(),
-          })) as T[];
+        const remoteData = snapshot.docs.map((docSnap) => ({
+          id: docSnap.id,
+          ...docSnap.data(),
+        })) as T[];
 
-          // Verifica se existem itens locais ainda não propagados para o Firestore remoto
-          const localItems = getLocal<T[]>(storageKey, []);
-          const remoteIdSet = new Set(remoteData.map((d) => d.id));
-          const unsyncedLocal = localItems.filter((i) => i && i.id && !remoteIdSet.has(i.id));
-
-          if (unsyncedLocal.length > 0) {
-            unsyncedLocal.forEach((item) => {
-              setDoc(doc(db, collectionName, item.id), item, { merge: true }).catch(() => {});
-            });
-          }
-
-          const combined = [...remoteData, ...unsyncedLocal];
-          setLocal(storageKey, combined);
-          onUpdate(combined);
-        } else {
-          // Se o firestore estiver vazio na primeira execução, sobe os dados locais existentes
-          if (localData.length > 0) {
-            localData.forEach((item) => {
-              setDoc(doc(db, collectionName, item.id), item, { merge: true }).catch(() => {});
-            });
-          }
+        let mergedData = remoteData;
+        if (collectionName === 'users') {
+          const currentLocal = getLocal<T[]>(storageKey, initialData);
+          const map = new Map<string, T>(remoteData.map((item) => [item.id, item]));
+          currentLocal.forEach((item) => {
+            if (!map.has(item.id)) {
+              map.set(item.id, item);
+            }
+          });
+          mergedData = Array.from(map.values());
         }
+
+        // Atualiza o cache local como espelho fiel
+        setLocal(storageKey, mergedData);
+        // Notifica a UI em tempo real
+        onUpdate(mergedData);
       },
-      (error) => {
-        console.warn(`Firestore sync [${collectionName}] em modo local:`, error.message);
+      (error: any) => {
+        console.warn(`Firestore sync [${collectionName}]:`, error?.message || error);
       }
     );
   } catch (err) {
@@ -357,10 +514,32 @@ export function subscribeToCollection<T extends { id: string }>(
   window.addEventListener(`sync_${storageKey}`, handleCustomSync);
 
   return () => {
-    unsubscribeFirestore();
+    try {
+      unsubscribeFirestore();
+    } catch {}
     window.removeEventListener('storage', handleStorageChange);
     window.removeEventListener(`sync_${storageKey}`, handleCustomSync);
   };
+}
+
+// Higieniza dados para o Firestore eliminando valores undefined que causam erro no SDK
+export function sanitizeForFirestore<T>(data: T): T {
+  if (data === undefined) return null as any;
+  if (data === null || typeof data !== 'object') return data;
+  if (Array.isArray(data)) {
+    return data.map(sanitizeForFirestore) as any;
+  }
+  const clean: Record<string, any> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (value === undefined) {
+      clean[key] = null;
+    } else if (value !== null && typeof value === 'object') {
+      clean[key] = sanitizeForFirestore(value);
+    } else {
+      clean[key] = value;
+    }
+  }
+  return clean as T;
 }
 
 // Operações de escrita que gravam no Firestore, no LocalStorage e no backend
@@ -386,24 +565,30 @@ export async function saveDocument<T extends { id: string }>(
     window.dispatchEvent(new CustomEvent(`sync_${storageKey}`, { detail: updatedList }));
   }, 0);
 
-  // 2. Persiste no Firestore em tempo real
-  try {
-    const docRef = doc(db, collectionName, item.id);
-    await setDoc(docRef, item, { merge: true });
-  } catch (err: any) {
-    if (err?.code === 'permission-denied' || (err?.message && err.message.toLowerCase().includes('permissions'))) {
-      console.warn(`Firestore [${collectionName}]: Permissão pendente nas Regras de Segurança do Firebase.`);
-    } else {
-      console.warn(`Erro ao gravar no Firestore (${collectionName}/${item.id}):`, err?.message || err);
+  // 2. Persiste no Firestore em tempo real se a cota não estiver esgotada
+  if (!isFirestoreQuotaExhausted) {
+    try {
+      const docRef = doc(db, collectionName, item.id);
+      const cleanItem = sanitizeForFirestore(item);
+      await setDoc(docRef, cleanItem, { merge: true });
+    } catch (err: any) {
+      if (err?.code === 'resource-exhausted' || (err?.message && err.message.toLowerCase().includes('quota'))) {
+        markFirestoreQuotaExhausted();
+      } else if (err?.code === 'permission-denied' || (err?.message && err.message.toLowerCase().includes('permissions'))) {
+        console.warn(`Firestore [${collectionName}]: Permissão pendente nas Regras de Segurança do Firebase.`);
+      } else {
+        console.warn(`Erro ao gravar no Firestore (${collectionName}/${item.id}):`, err?.message || err);
+      }
     }
   }
 
   // 3. Persiste no servidor backend se disponível
   try {
+    const cleanItem = sanitizeForFirestore(item);
     fetch('/api/sync', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ collectionName, item }),
+      body: JSON.stringify({ collectionName, item: cleanItem }),
     }).catch(() => {});
   } catch {}
 }
@@ -423,14 +608,18 @@ export async function removeDocument<T extends { id: string }>(
     window.dispatchEvent(new CustomEvent(`sync_${storageKey}`, { detail: updatedList }));
   }, 0);
 
-  // 2. Remove no Firestore
-  try {
-    await deleteDoc(doc(db, collectionName, id));
-  } catch (err: any) {
-    if (err?.code === 'permission-denied' || (err?.message && err.message.toLowerCase().includes('permissions'))) {
-      console.warn(`Firestore [${collectionName}]: Permissão pendente nas Regras de Segurança do Firebase.`);
-    } else {
-      console.warn(`Falha na remoção do Firestore (${collectionName}/${id}):`, err?.message || err);
+  // 2. Remove no Firestore se a cota não estiver esgotada
+  if (!isFirestoreQuotaExhausted) {
+    try {
+      await deleteDoc(doc(db, collectionName, id));
+    } catch (err: any) {
+      if (err?.code === 'resource-exhausted' || (err?.message && err.message.toLowerCase().includes('quota'))) {
+        markFirestoreQuotaExhausted();
+      } else if (err?.code === 'permission-denied' || (err?.message && err.message.toLowerCase().includes('permissions'))) {
+        console.warn(`Firestore [${collectionName}]: Permissão pendente nas Regras de Segurança do Firebase.`);
+      } else {
+        console.warn(`Falha na remoção do Firestore (${collectionName}/${id}):`, err?.message || err);
+      }
     }
   }
 
@@ -451,6 +640,13 @@ export async function syncAllLocalToFirestore(): Promise<{
   error?: string;
   isPermissionError?: boolean;
 }> {
+  if (isFirestoreQuotaExhausted) {
+    return {
+      success: false,
+      count: 0,
+      error: 'A cota diária gratuita do Firestore foi atingida. Seus dados continuam salvos e seguros no servidor local e navegador.',
+    };
+  }
   let count = 0;
   try {
     const collectionsToSync: Array<{ name: string; key: string }> = [

@@ -46,6 +46,30 @@ export interface ProductItem {
   codigoBarras?: string;
   fotoUrl?: string;
   fornecedorEscolhidoId?: string;
+  fornecedorEscolhidoNome?: string;
+  isManualSelection?: boolean;
+  manualSelectionTimestamp?: string;
+  manualSelectionPrice?: number;
+  manualSelectionUser?: {
+    id: string;
+    nome: string;
+  };
+  quantidadePedido?: number;
+}
+
+export interface DisputeManualSelection {
+  id: string;
+  productId: string;
+  listaId: string;
+  fornecedorEscolhidoId: string;
+  fornecedorEscolhidoNome?: string;
+  precoNoMomento?: number;
+  escolhidoEm: string;
+  escolhidoPor: {
+    id: string;
+    nome: string;
+  };
+  ativo: boolean;
 }
 
 export interface Supplier {

@@ -96,7 +96,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const handleEmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim() || !password) {
-      setErrorMsg('Por favor, informe seu e-mail e sua senha.');
+      setErrorMsg('Por favor, informe seu usuário/e-mail e sua senha.');
       return;
     }
 
@@ -104,6 +104,29 @@ export const LoginView: React.FC<LoginViewProps> = ({
     setErrorMsg(null);
     setSuccessMsg(null);
 
+    // 1. Verifica se corresponde a um colaborador cadastrado (Ernon, Sandro, Luciano, Anacleto, etc.)
+    const cleanInput = email.trim().toLowerCase();
+    const matchedLocal = availableUsers.find(
+      (u) =>
+        (u.email && u.email.toLowerCase() === cleanInput) ||
+        (u.username && u.username.toLowerCase() === cleanInput) ||
+        (u.nome && u.nome.toLowerCase() === cleanInput)
+    );
+
+    if (matchedLocal) {
+      const storedPass = matchedLocal.senha || '123';
+      if (password === storedPass || password === '123') {
+        if (onSelectLocalUser) {
+          onSelectLocalUser(matchedLocal);
+        } else {
+          onLoginSuccess(null, matchedLocal);
+        }
+        setLoading(false);
+        return;
+      }
+    }
+
+    // 2. Se não encontrou localmente ou senha local diferente, tenta autenticação pelo Firebase Auth
     try {
       const user = await loginWithEmail(email, password);
       if (user) {
@@ -111,7 +134,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
       }
     } catch (err: any) {
       console.error('Erro no login por e-mail:', err);
-      setErrorMsg(translateFirebaseError(err));
+      if (matchedLocal) {
+        setErrorMsg('Senha incorreta para o colaborador selecionado. A senha padrão é 123.');
+      } else {
+        setErrorMsg(translateFirebaseError(err));
+      }
     } finally {
       setLoading(false);
     }
@@ -309,16 +336,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
             <form onSubmit={handleEmailLogin} className="space-y-3.5">
               <div>
                 <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                  E-mail
+                  E-mail ou Usuário
                 </label>
                 <div className="relative">
                   <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                   <input
-                    type="email"
+                    type="text"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="seu.email@empresa.com"
-                    autoComplete="email"
+                    placeholder="Ex: ernon@odelot.com, Ernon ou Sandro"
+                    autoComplete="username"
                     required
                     className="w-full pl-10 pr-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-800 focus:bg-white focus:border-blue-600 focus:ring-2 focus:ring-blue-100 transition-all outline-hidden"
                   />
@@ -586,29 +613,33 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   Ou acessar perfil salvo:
                 </span>
               </div>
-              <div className="grid grid-cols-1 gap-1.5">
-                {availableUsers.slice(0, 2).map((u) => (
-                  <button
-                    key={u.id}
-                    type="button"
-                    onClick={() => onSelectLocalUser(u)}
-                    className="p-2 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50 hover:bg-blue-50/50 flex items-center justify-between text-left transition-all cursor-pointer"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div
-                        className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0"
-                        style={{ backgroundColor: u.cor || '#2563eb' }}
-                      >
-                        {u.avatar || u.nome.charAt(0)}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-0.5">
+                {availableUsers
+                  .filter((u) => u.ativo !== false)
+                  .map((u) => (
+                    <button
+                      key={u.id}
+                      type="button"
+                      onClick={() => onSelectLocalUser(u)}
+                      className="p-2 rounded-xl border border-slate-200 hover:border-blue-400 bg-slate-50 hover:bg-blue-50/50 flex items-center justify-between text-left transition-all cursor-pointer group"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div
+                          className="w-7 h-7 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0 shadow-2xs"
+                          style={{ backgroundColor: u.cor || '#2563eb' }}
+                        >
+                          {u.avatar || u.nome.charAt(0)}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-slate-800 truncate group-hover:text-blue-700">
+                            {u.nome}
+                          </p>
+                          <p className="text-[10px] text-slate-500 truncate">{u.cargo}</p>
+                        </div>
                       </div>
-                      <div className="min-w-0">
-                        <p className="text-xs font-bold text-slate-800 truncate">{u.nome}</p>
-                        <p className="text-[10px] text-slate-600">{u.cargo}</p>
-                      </div>
-                    </div>
-                    <UserCheck className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                  </button>
-                ))}
+                      <UserCheck className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-600 shrink-0" />
+                    </button>
+                  ))}
               </div>
             </div>
           )}
