@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Lock,
   Building2,
@@ -171,20 +171,27 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
     }));
   };
 
-  const totalValue = Object.entries(items).reduce((acc, [, resp]) => {
+  const currentProductIds = useMemo(
+    () => new Set(listProducts.map((p) => p.id)),
+    [listProducts]
+  );
+
+  const totalValue = Object.entries(items).reduce((acc, [pId, resp]) => {
+    if (!currentProductIds.has(pId)) return acc;
     const price = Number(resp.precoUnitario) || 0;
     const qty = Number(resp.quantidade) || 0;
     return acc + price * qty;
   }, 0);
 
-  const quotedItemsCount = Object.values(items).filter(
-    (i) => Number(i.precoUnitario) > 0
+  const quotedItemsCount = Object.entries(items).filter(
+    ([pId, i]) => currentProductIds.has(pId) && Number(i.precoUnitario) > 0
   ).length;
 
   const saveCurrentQuote = useCallback(
     async (isFinalSubmit: boolean = false) => {
       const sanitizedItems: Record<string, QuoteItemResponse> = {};
       Object.entries(items).forEach(([pId, item]) => {
+        if (!currentProductIds.has(pId)) return;
         const parsedQty = parseFloat(String(item.quantidade).replace(',', '.'));
         sanitizedItems[pId] = {
           ...item,
@@ -242,6 +249,7 @@ export const SupplierPortalView: React.FC<SupplierPortalViewProps> = ({
       condicoesPagamento,
       frete,
       observacoesGerais,
+      currentProductIds,
       onSaveQuote,
     ]
   );

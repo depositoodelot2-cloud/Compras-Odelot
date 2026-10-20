@@ -187,13 +187,24 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   }, [onRefreshQuotes]);
 
   const activeList = lists.find((l) => l.id === activeListId) || lists[0] || DEFAULT_EMPTY_LIST;
-  const listProducts = useMemo(
-    () =>
-      activeList?.id
-        ? products.filter((p) => p.listaId === activeList.id && p.status !== 'comprado')
-        : [],
-    [products, activeList?.id]
-  );
+  const listProducts = useMemo(() => {
+    if (!activeList?.id) return [];
+    const raw = products.filter((p) => p.listaId === activeList.id && p.status !== 'comprado');
+    const seenIds = new Set<string>();
+    const seenKeys = new Set<string>();
+    const unique: ProductItem[] = [];
+    for (const p of raw) {
+      if (seenIds.has(p.id)) continue;
+      const norm = (p.nome || '').trim().toLowerCase();
+      const barcode = (p.codigoBarras || '').trim();
+      const key = barcode ? `b_${barcode}` : `n_${norm}`;
+      if (seenKeys.has(key)) continue;
+      seenIds.add(p.id);
+      seenKeys.add(key);
+      unique.push(p);
+    }
+    return unique;
+  }, [products, activeList?.id]);
 
   // Suppliers enabled for this factory/list (configured when creating/editing the list)
   const enabledSuppliers = useMemo(() => {
@@ -239,9 +250,18 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   }, [quotes, activeList?.id, activeSupplier?.id]);
 
   // Form states for items
-  const [quoteItems, setQuoteItems] = useState<Record<string, QuoteItemResponse>>(
-    existingQuote?.itens || {}
-  );
+  const [quoteItems, setQuoteItems] = useState<Record<string, QuoteItemResponse>>(() => {
+    if (!existingQuote?.itens) return {};
+    const currentProductIds = new Set(listProducts.map((p) => p.id));
+    if (currentProductIds.size === 0) return existingQuote.itens;
+    const filtered: Record<string, QuoteItemResponse> = {};
+    for (const [k, v] of Object.entries(existingQuote.itens)) {
+      if (currentProductIds.has(k)) {
+        filtered[k] = v;
+      }
+    }
+    return filtered;
+  });
   const [prazoEntrega, setPrazoEntrega] = useState(
     existingQuote?.prazoEntrega || '24 a 48 horas'
   );
@@ -407,8 +427,12 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   React.useEffect(() => {
     if (existingQuote) {
       if (existingQuote.itens) {
+        const currentProductIds = new Set(listProducts.map((p) => p.id));
         const sanitized: Record<string, QuoteItemResponse> = {};
         Object.entries(existingQuote.itens).forEach(([k, val]) => {
+          if (currentProductIds.size > 0 && !currentProductIds.has(k)) {
+            return;
+          }
           const b = val.ma?.trim();
           sanitized[k] = {
             ...val,
@@ -445,7 +469,7 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
       setFrete('CIF (Incluso)');
       setObservacoesGerais('');
     }
-  }, [existingQuote, activeSupplier?.id, activeList.id]);
+  }, [existingQuote, activeSupplier?.id, activeList.id, listProducts]);
 
   // Handle item change with real-time auto-save
   const handleItemFieldChange = (
@@ -468,12 +492,19 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
       };
 
       if (activeSupplier) {
-        const hasPrices = Object.values(updated).some((i) => Number(i.precoUnitario) > 0);
+        const currentProductIds = new Set(listProducts.map((p) => p.id));
+        const activeListQuoteItems: Record<string, QuoteItemResponse> = {};
+        for (const [k, v] of Object.entries(updated)) {
+          if (currentProductIds.size === 0 || currentProductIds.has(k)) {
+            activeListQuoteItems[k] = v;
+          }
+        }
+        const hasPrices = Object.values(activeListQuoteItems).some((i) => Number(i.precoUnitario) > 0);
         const newQuote: SupplierQuote = {
           id: existingQuote ? existingQuote.id : `quote-${Date.now()}`,
           listaId: activeList.id,
           fornecedorId: activeSupplier.id,
-          itens: updated,
+          itens: activeListQuoteItems,
           status: hasPrices ? 'respondido' : 'pendente',
           preenchidoPor: 'empresa',
           prazoEntrega: prazoEntrega || '24 a 48 horas',
@@ -534,18 +565,14 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
     }
   };
 
-  // Quoted count
+  // Quoted count - apenas produtos que pertencem à lista ativa
   const quotedCount = useMemo(() => {
-    return Object.values(quoteItems).filter((i) => i.precoUnitario > 0).length;
-  }, [quoteItems]);
-
-  const totalQuoteValue = useMemo(() => {
-    return Object.entries(quoteItems).reduce((sum, [pId, resp]) => {
-      const price = Number(resp.precoUnitario) || 0;
-      const qty = Number(resp.quantidade) || 0;
-      return sum + price * qty;
-    }, 0);
-  }, [quoteItems]);
+    if (!listProducts || listProducts.length === 0) return 0;
+    const currentProductIds = new Set(listProducts.map((p) => p.id));
+    return Object.entries(quoteItems).filter(
+      ([pId, i]) => currentProductIds.has(pId) && Number(i.precoUnitario) > 0
+    ).length;
+  }, [quoteItems, listProducts]);
 
   // Quotes for this list (for Disputa tab) - sorted by latest and merged by supplier
   const quotesForList = useMemo(() => {
@@ -808,11 +835,19 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
   const handleSaveCurrentQuote = () => {
     if (!activeSupplier) return;
 
+    const currentProductIds = new Set(listProducts.map((p) => p.id));
+    const activeListQuoteItems: Record<string, QuoteItemResponse> = {};
+    for (const [k, v] of Object.entries(quoteItems)) {
+      if (currentProductIds.size === 0 || currentProductIds.has(k)) {
+        activeListQuoteItems[k] = v;
+      }
+    }
+
     const newQuote: SupplierQuote = {
       id: existingQuote ? existingQuote.id : `quote-${Date.now()}`,
       listaId: activeList.id,
       fornecedorId: activeSupplier.id,
-      itens: quoteItems,
+      itens: activeListQuoteItems,
       status: quotedCount > 0 ? 'respondido' : 'pendente',
       preenchidoPor: 'empresa',
       prazoEntrega,
@@ -1335,11 +1370,6 @@ export const QuotesView: React.FC<QuotesViewProps> = ({
                 <span className="text-xs font-extrabold uppercase tracking-wider text-slate-700">
                   Produtos da Lista ({listProducts.length} itens)
                 </span>
-                {totalQuoteValue > 0 && (
-                  <span className="text-xs font-bold text-slate-600">
-                    Total: <strong className="text-emerald-700 text-sm font-black">{formatCurrency(totalQuoteValue)}</strong>
-                  </span>
-                )}
               </div>
 
               {listProducts.length === 0 ? (

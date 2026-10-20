@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Shield,
   X,
@@ -575,27 +575,57 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     }, 3000);
   };
 
+  const isAddingToListRef = useRef<Record<string, boolean>>({});
+
   const handleAddToList = (item: CatalogProduct, list: PurchaseList) => {
-    if (onAddFromCatalog) {
-      const parsedQty = parseFloat(item.unidadePadrao);
-      const qty = !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1;
-      const listName = list.fabrica || list.nome || 'Lista';
-      onAddFromCatalog(item, qty, item.prioridadePadrao || 'cotacao', list.id);
-      setAddedCatalogIds((prev) => ({ ...prev, [item.id]: true }));
-      setAddedListFeedback((prev) => ({ ...prev, [item.id]: listName }));
-      setCatalogToastMessage(`"${item.nome}" incluído na lista "${listName}"!`);
-      setTimeout(() => {
-        setAddedCatalogIds((prev) => ({ ...prev, [item.id]: false }));
-        setAddedListFeedback((prev) => {
-          const copy = { ...prev };
-          delete copy[item.id];
-          return copy;
-        });
-      }, 2500);
+    if (!onAddFromCatalog) return;
+
+    // Guard against rapid duplicate clicks (within 1.5s)
+    if (isAddingToListRef.current[item.id]) return;
+    isAddingToListRef.current[item.id] = true;
+    setTimeout(() => {
+      delete isAddingToListRef.current[item.id];
+    }, 1500);
+
+    const listName = list.fabrica || list.nome || 'Lista';
+
+    // Check if item is ALREADY pending in this list
+    const isAlreadyInList = products.some((p) => {
+      if (p.listaId !== list.id || p.status === 'comprado') return false;
+      const matchName = p.nome && item.nome && p.nome.trim().toLowerCase() === item.nome.trim().toLowerCase();
+      const matchBarcode = Boolean(
+        item.codigoBarras && item.codigoBarras.trim() &&
+        p.codigoBarras && p.codigoBarras.trim() &&
+        item.codigoBarras.trim() === p.codigoBarras.trim()
+      );
+      return Boolean(matchName || matchBarcode);
+    });
+
+    if (isAlreadyInList) {
+      setCatalogToastMessage(`"${item.nome}" já está incluído na lista "${listName}"!`);
       setTimeout(() => {
         setCatalogToastMessage(null);
-      }, 3500);
+      }, 3000);
+      return;
     }
+
+    const parsedQty = parseFloat(item.unidadePadrao);
+    const qty = !isNaN(parsedQty) && parsedQty > 0 ? parsedQty : 1;
+    onAddFromCatalog(item, qty, item.prioridadePadrao || 'cotacao', list.id);
+    setAddedCatalogIds((prev) => ({ ...prev, [item.id]: true }));
+    setAddedListFeedback((prev) => ({ ...prev, [item.id]: listName }));
+    setCatalogToastMessage(`"${item.nome}" incluído na lista "${listName}"!`);
+    setTimeout(() => {
+      setAddedCatalogIds((prev) => ({ ...prev, [item.id]: false }));
+      setAddedListFeedback((prev) => {
+        const copy = { ...prev };
+        delete copy[item.id];
+        return copy;
+      });
+    }, 2500);
+    setTimeout(() => {
+      setCatalogToastMessage(null);
+    }, 3500);
   };
 
   const handleQuickAdd = (item: CatalogProduct) => {
@@ -1629,8 +1659,11 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     const isAdded = !!addedCatalogIds[item.id];
                     const pStyle = getPriorityStyle(item.prioridadePadrao || 'cotacao');
 
-                    // Identifica se este produto do catálogo está presente em alguma lista
+                    // Identifica se este produto do catálogo está presente em alguma lista ativa (pendente de compra)
                     const matchingProducts = products.filter((p) => {
+                      // Se já foi comprado ou concluído, não está mais presente na lista de compras ativa
+                      if (p.status === 'comprado') return false;
+
                       const matchByName =
                         p.nome && item.nome && p.nome.trim().toLowerCase() === item.nome.trim().toLowerCase();
                       const matchByBarcode =
@@ -1639,14 +1672,14 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                         p.codigoBarras &&
                         p.codigoBarras.trim() &&
                         item.codigoBarras.trim() === p.codigoBarras.trim();
-                      return matchByName || matchByBarcode;
+                      return Boolean(matchByName || matchByBarcode);
                     });
 
                     const inListNames = Array.from(
                       new Set(
                         matchingProducts
                           .map((p) => {
-                            const found = (availableLists || []).find((l) => l.id === p.listaId);
+                            const found = (availableLists || []).find((l) => l.id === p.listaId && l.ativa !== false);
                             return found ? (found.fabrica || found.nome) : null;
                           })
                           .filter(Boolean) as string[]
@@ -1667,19 +1700,17 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                           onClick={() => {
                             if (item.fotoUrl) {
                               setZoomedCatalogProduct(item);
-                            } else {
-                              handleQuickAdd(item);
                             }
                           }}
                           className={`w-10 h-10 sm:w-11 sm:h-11 rounded-lg border-2 border-dashed border-slate-300 flex flex-col items-center justify-center shrink-0 overflow-hidden relative group transition-colors ${
                             item.fotoUrl
                               ? 'cursor-zoom-in hover:border-blue-400 bg-slate-50'
-                              : 'cursor-pointer hover:border-blue-400 bg-slate-50/50'
+                              : 'bg-slate-50/50'
                           }`}
                           title={
                             item.fotoUrl
                               ? 'Clique na foto para visualizar (1x)'
-                              : 'Clique para adicionar à lista'
+                              : 'Sem foto cadastrada'
                           }
                         >
                           {item.fotoUrl ? (
@@ -1706,7 +1737,8 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                         {/* 2. Center Content - clean, optimized layout with clear product name view */}
                         <div
                           className="min-w-0 flex-1 cursor-pointer"
-                          onClick={() => handleQuickAdd(item)}
+                          onClick={() => handleOpenEditCatalog(item)}
+                          title="Clique para editar este item na base permanente"
                         >
                           {/* Linha 1: Nome do produto com tipografia nítida e destacada */}
                           <h3
@@ -1843,7 +1875,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                     </div>
                                   ) : (
                                     availableLists.map((l) => {
-                                      const isCurrent = l.id === activeList?.id;
+                                      const isProductInThisList = matchingProducts.some((p) => p.listaId === l.id);
                                       const listTitle = l.fabrica || l.nome || 'Lista';
                                       return (
                                         <button
@@ -1853,29 +1885,20 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                                             handleAddToList(item, l);
                                             setAddToListDropdownItemId(null);
                                           }}
-                                          className={`w-full px-2.5 py-2 rounded-xl text-left text-xs font-bold flex items-center justify-between gap-2 transition-all cursor-pointer group ${
-                                            isCurrent
-                                              ? 'bg-blue-50/70 hover:bg-blue-100/80 text-blue-900 border border-blue-200/60 shadow-2xs'
-                                              : 'hover:bg-slate-100 text-slate-700 hover:text-slate-900 border border-transparent'
-                                          }`}
+                                          className="w-full px-2.5 py-2 rounded-xl text-left text-xs font-bold flex items-center justify-between gap-2 transition-all cursor-pointer group hover:bg-blue-50/80 text-slate-700 hover:text-blue-900 border border-transparent hover:border-blue-100"
                                         >
                                           <div className="flex items-center gap-2 min-w-0">
-                                            <div
-                                              className={`w-2 h-2 rounded-full shrink-0 ${
-                                                isCurrent
-                                                  ? 'bg-blue-600 ring-2 ring-blue-300'
-                                                  : 'bg-slate-300 group-hover:bg-blue-500'
-                                              }`}
-                                            />
+                                            <div className="w-2 h-2 rounded-full bg-slate-300 group-hover:bg-blue-500 shrink-0" />
                                             <span className="truncate">{listTitle}</span>
                                           </div>
-                                          {isCurrent ? (
-                                            <span className="text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded-md bg-blue-600 text-white shrink-0">
-                                              Ativa
-                                            </span>
-                                          ) : (
+                                          <div className="flex items-center gap-1.5 shrink-0">
+                                            {isProductInThisList && (
+                                              <span className="text-[9.5px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-md">
+                                                Na lista
+                                              </span>
+                                            )}
                                             <Plus className="w-3.5 h-3.5 text-slate-400 group-hover:text-blue-600 shrink-0" />
-                                          )}
+                                          </div>
                                         </button>
                                       );
                                     })

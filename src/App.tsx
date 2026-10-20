@@ -951,10 +951,24 @@ export default function App() {
     return lists.find((l) => l.id === activeListId) || lists[0] || DEFAULT_EMPTY_LIST;
   }, [lists, activeListId]);
 
-  // Products belonging to the active list that are still pending to buy
+  // Products belonging to the active list that are still pending to buy (with anti-duplication protection)
   const currentListProducts = useMemo(() => {
     if (!activeList || !activeList.id) return [];
-    return products.filter((p) => p.listaId === activeList.id && p.status !== 'comprado');
+    const raw = products.filter((p) => p.listaId === activeList.id && p.status !== 'comprado');
+    const seenIds = new Set<string>();
+    const seenKeys = new Set<string>();
+    const unique: ProductItem[] = [];
+    for (const p of raw) {
+      if (seenIds.has(p.id)) continue;
+      const norm = (p.nome || '').trim().toLowerCase();
+      const barcode = (p.codigoBarras || '').trim();
+      const key = barcode ? `b_${barcode}` : `n_${norm}`;
+      if (seenKeys.has(key)) continue;
+      seenIds.add(p.id);
+      seenKeys.add(key);
+      unique.push(p);
+    }
+    return unique;
   }, [products, activeList]);
 
 
@@ -1567,7 +1581,7 @@ export default function App() {
     setSuppliers((prev) => prev.filter((s) => s.id !== supplierId));
   };
 
-  // Add product from Catalog
+  // Add product from Catalog with strict duplication prevention
   const handleAddFromCatalog = async (
     item: CatalogProduct,
     quantidade: number = 1,
@@ -1576,10 +1590,39 @@ export default function App() {
   ) => {
     const listIdToUse = targetListId || activeList.id;
     const targetList = lists.find((l) => l.id === listIdToUse) || activeList;
+    const cleanItemName = capitalizeWords(item.nome.trim());
+    const cleanBarcode = (item.codigoBarras || '').trim();
+
+    // Check if this product is ALREADY in the target list (pending)
+    const existing = products.find((p) => {
+      if (p.listaId !== listIdToUse || p.status === 'comprado') return false;
+      const matchName = p.nome && p.nome.trim().toLowerCase() === cleanItemName.toLowerCase();
+      const matchBarcode = Boolean(cleanBarcode && p.codigoBarras && p.codigoBarras.trim() === cleanBarcode);
+      return Boolean(matchName || matchBarcode);
+    });
+
+    if (existing) {
+      // Product already exists in this list: update quantity instead of adding duplicate row
+      const targetQty = (Number(existing.quantidade) || 0) + (quantidade || 1);
+      const updated: ProductItem = {
+        ...existing,
+        quantidade: targetQty,
+        fotoUrl: existing.fotoUrl || item.fotoUrl,
+        codigoBarras: existing.codigoBarras || item.codigoBarras,
+      };
+      await saveDocument('products', STORAGE_KEYS.PRODUCTS, updated);
+      setProducts((prev) => prev.map((p) => (p.id === existing.id ? updated : p)));
+      setPurchaseToastMessage(
+        `"${cleanItemName}" já constava na lista "${targetList.fabrica || targetList.nome}". Quantidade ajustada para ${targetQty}.`
+      );
+      setTimeout(() => setPurchaseToastMessage(null), 3500);
+      return;
+    }
+
     const newProd: ProductItem = {
       id: `prod-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
       listaId: listIdToUse,
-      nome: capitalizeWords(item.nome),
+      nome: cleanItemName,
       marca: item.marcaPadrao || targetList.fabrica,
       unidade: item.unidadePadrao || 'UN',
       quantidade: quantidade || 1,

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   X,
   Search,
@@ -47,6 +47,7 @@ export const CatalogModal: React.FC<CatalogModalProps> = ({
   const [novaPrioridade, setNovaPrioridade] = useState<Priority>('cotacao');
   const [addedItemIds, setAddedItemIds] = useState<Record<string, boolean>>({});
   const [zoomedCatalogProduct, setZoomedCatalogProduct] = useState<CatalogProduct | null>(null);
+  const isAddingRef = useRef<Record<string, boolean>>({});
 
   if (!isOpen) return null;
 
@@ -58,6 +59,12 @@ export const CatalogModal: React.FC<CatalogModalProps> = ({
   );
 
   const handleQuickAdd = (item: CatalogProduct) => {
+    if (isAddingRef.current[item.id]) return;
+    isAddingRef.current[item.id] = true;
+    setTimeout(() => {
+      delete isAddingRef.current[item.id];
+    }, 1500);
+
     onAddFromCatalog(item, 1, item.prioridadePadrao || 'cotacao');
     setAddedItemIds((prev) => ({ ...prev, [item.id]: true }));
     setTimeout(() => {
