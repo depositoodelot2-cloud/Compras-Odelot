@@ -1149,24 +1149,35 @@ export default function App() {
   };
 
   const handleConfirmAllPurchased = async () => {
-    if (currentListProducts.length === 0) return;
+    // Alvo da compra: se estiver filtrando por uma prioridade específica (fixo, novo, cotacao, urgente),
+    // afeta EXCLUSIVAMENTE os produtos dessa prioridade, mantendo os das outras prioridades na lista!
+    const targetProductsToBuy =
+      selectedPriority !== 'total'
+        ? (filteredProducts.length > 0
+            ? filteredProducts.filter((p) => p.prioridade === selectedPriority)
+            : currentListProducts.filter((p) => p.prioridade === selectedPriority))
+        : (filteredProducts.length > 0 ? filteredProducts : currentListProducts);
 
-    // 1. Mark all current list products as 'comprado'
+    if (targetProductsToBuy.length === 0) return;
+
+    const targetIds = new Set(targetProductsToBuy.map((p) => p.id));
+
+    // 1. Marca como 'comprado' SOMENTE os produtos da prioridade filtrada
     const updatedProducts = products.map((p) => {
-      if (p.listaId === activeList.id && p.status !== 'comprado') {
+      if (targetIds.has(p.id)) {
         return { ...p, status: 'comprado' as const };
       }
       return p;
     });
 
-    for (const prod of currentListProducts) {
+    for (const prod of targetProductsToBuy) {
       await saveDocument('products', STORAGE_KEYS.PRODUCTS, { ...prod, status: 'comprado' });
     }
     setProducts(updatedProducts);
 
-    // 2. Guarantee all are saved in the Catalog
+    // 2. Garante que os produtos comprados estejam salvos no Catálogo
     const updatedCatalog = [...catalog];
-    for (const prod of currentListProducts) {
+    for (const prod of targetProductsToBuy) {
       const existing = updatedCatalog.find(
         (c) =>
           c.nome.toLowerCase().trim() === prod.nome.toLowerCase().trim() ||
@@ -1190,8 +1201,19 @@ export default function App() {
     setCatalog(updatedCatalog);
     setSelectAllActive(false);
 
+    const priorityNames: Record<string, string> = {
+      fixo: 'Fixo',
+      novo: 'Novo',
+      cotacao: 'Cotação',
+      urgente: 'Urgente',
+    };
+    const priorityLabel =
+      selectedPriority !== 'total' && priorityNames[selectedPriority]
+        ? `da prioridade "${priorityNames[selectedPriority]}"`
+        : 'da lista';
+
     setPurchaseToastMessage(
-      `Todos os ${currentListProducts.length} produtos foram marcados como comprados e salvos no Catálogo!`
+      `${targetProductsToBuy.length} ${targetProductsToBuy.length === 1 ? 'produto' : 'produtos'} ${priorityLabel} ${targetProductsToBuy.length === 1 ? 'marcado' : 'marcados'} como ${targetProductsToBuy.length === 1 ? 'comprado' : 'comprados'}!`
     );
     setTimeout(() => {
       setPurchaseToastMessage(null);
@@ -1883,7 +1905,10 @@ export default function App() {
                 searchTerm={searchTerm}
                 onSearchChange={setSearchTerm}
                 selectedPriority={selectedPriority}
-                onSelectPriority={setSelectedPriority}
+                onSelectPriority={(p) => {
+                  setSelectedPriority(p);
+                  setSelectAllActive(false);
+                }}
                 priorityCounts={priorityCounts}
                 users={users}
                 selectedUserId={selectedUserId}

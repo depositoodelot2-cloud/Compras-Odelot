@@ -201,7 +201,11 @@ export const PriorityFilters: React.FC<PriorityFiltersProps> = ({
             type="button"
             onClick={onConfirmAllPurchased}
             className="bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-xs font-bold px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-sm transition-all cursor-pointer whitespace-nowrap shrink-0 animate-in fade-in slide-in-from-left-2 duration-150"
-            title="Confirmar compra de todos os itens da lista"
+            title={
+              selectedPriority !== 'total'
+                ? `Confirmar compra dos itens da prioridade ${selectedPriority.toUpperCase()}`
+                : 'Confirmar compra de todos os itens da lista'
+            }
           >
             <Check className="w-3.5 h-3.5 stroke-[3]" />
             <span>Sim, já foi comprado</span>
